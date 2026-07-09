@@ -1,0 +1,252 @@
+@import '@fontsource/barlow-condensed/400.css';
+@import '@fontsource/barlow-condensed/500.css';
+@import '@fontsource/barlow-condensed/600.css';
+@import '@fontsource/barlow-condensed/700.css';
+@import '@fontsource/manrope/400.css';
+@import '@fontsource/manrope/500.css';
+@import '@fontsource/manrope/600.css';
+@import '@fontsource/manrope/700.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
+@import '@fontsource/inter/400.css';
+@import '@fontsource/inter/500.css';
+@import '@fontsource/inter/600.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        /* FalconOps AI Enterprise Theme */
+        --background: 216 33% 6%;
+        --foreground: 0 0% 100%;
+        --card: 220 30% 11%;
+        --card-foreground: 0 0% 100%;
+        --popover: 220 30% 11%;
+        --popover-foreground: 0 0% 100%;
+        /* Falcon Gold - Brand accent */
+        --primary: 43 90% 61%;
+        --primary-foreground: 0 0% 0%;
+        /* Neon Cyan - AI signals */
+        --secondary: 186 100% 50%;
+        --secondary-foreground: 0 0% 0%;
+        --muted: 220 25% 14%;
+        --muted-foreground: 0 0% 64%;
+        --accent: 145 100% 39%;
+        --accent-foreground: 0 0% 0%;
+        --destructive: 0 72% 51%;
+        --destructive-foreground: 0 0% 100%;
+        --border: 220 20% 18%;
+        --input: 220 20% 18%;
+        --ring: 43 90% 61%;
+        --radius: 0.75rem;
+        /* Chart colors */
+        --chart-1: 186 100% 50%;
+        --chart-2: 145 100% 39%;
+        --chart-3: 43 90% 61%;
+        --chart-4: 0 72% 51%;
+        --chart-5: 280 65% 60%;
+        /* Status colors */
+        --success: 145 100% 39%;
+        --warning: 43 100% 50%;
+        --info: 186 100% 50%;
+        /* Brand colors as CSS vars */
+        --falcon-gold: #F5B841;
+        --neon-cyan: #00E0FF;
+        --status-healthy: #00C853;
+        --status-warning: #FFB300;
+        --status-critical: #D32F2F;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground font-body antialiased;
+        background-color: #0B0F14;
+        min-height: 100vh;
+    }
+}
+
+/* FalconOps Grid background */
+.obsidian-grid {
+    background-color: #0B0F14;
+    background-image: 
+        linear-gradient(rgba(255, 255, 255, 0.015) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.015) 1px, transparent 1px);
+    background-size: 40px 40px;
+}
+
+/* Cyber scanline effect */
+@keyframes scanline {
+    0% { transform: translateY(-100%); }
+    100% { transform: translateY(100vh); }
+}
+
+.scanline {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: linear-gradient(90deg, transparent, hsl(var(--cyan)), transparent);
+    opacity: 0.3;
+    animation: scanline 3s linear infinite;
+    pointer-events: none;
+}
+
+/* Tech border accent */
+.tech-border {
+    border-left: 2px solid hsl(var(--gold));
+}
+
+/* Cyan glow for AI elements */
+.glow-cyan {
+    box-shadow: 0 0 30px rgba(0, 240, 255, 0.3), 0 0 60px rgba(0, 240, 255, 0.1);
+}
+
+/* Gold glow for executive elements */
+.glow-gold {
+    box-shadow: 0 0 30px rgba(212, 175, 55, 0.3), 0 0 60px rgba(212, 175, 55, 0.1);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: hsl(var(--muted));
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: hsl(var(--border));
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--primary) / 0.5);
+}
+
+/* Obsidian Glass - Glass morphism utility */
+.glass {
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.glass-strong {
+    background: rgba(0, 0, 0, 0.8);
+    backdrop-filter: blur(24px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Glow effects */
+.glow-primary {
+    box-shadow: 0 0 20px rgba(212, 175, 55, 0.4), 0 0 40px rgba(212, 175, 55, 0.2);
+}
+
+.glow-accent {
+    box-shadow: 0 0 20px rgba(212, 175, 55, 0.3);
+}
+
+.glow-destructive {
+    box-shadow: 0 0 20px rgba(255, 59, 48, 0.4);
+}
+
+/* Status badges */
+.badge-live {
+    position: relative;
+}
+
+.badge-live::before {
+    content: '';
+    position: absolute;
+    left: -8px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: hsl(var(--success));
+    animation: pulse-warning 1.5s ease-in-out infinite;
+}
+
+/* Grid pattern overlay */
+.grid-pattern {
+    background-image: 
+        linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+    background-size: 50px 50px;
+}
+
+/* Noise texture */
+.noise {
+    position: relative;
+}
+
+.noise::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+    opacity: 0.03;
+    pointer-events: none;
+}
+
+/* Status indicator animations */
+@keyframes pulse-critical {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.pulse-critical {
+    animation: pulse-critical 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse-warning {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.pulse-warning {
+    animation: pulse-warning 2s ease-in-out infinite;
+}
+
+/* Slide in animation */
+@keyframes slide-in-bottom {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.animate-slide-in {
+    animation: slide-in-bottom 0.5s ease-out forwards;
+}
+
+/* Fade in animation */
+@keyframes fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.animate-fade-in {
+    animation: fade-in 0.3s ease-out forwards;
+}
+
+/* Data wrapper fix */
+@layer base {
+    [data-debug-wrapper="true"] {
+        display: contents !important;
+    }
+}

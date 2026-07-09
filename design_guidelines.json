@@ -1,0 +1,194 @@
+{
+  "project_name": "FalconOps AI - Database Monitoring Redesign",
+  "design_philosophy": {
+    "identity": "E1 - The Anti-AI Designer",
+    "core_principles": [
+      "Fusion over Imitation: Mix Swiss Brutalism with Cyberpunk NOC aesthetics.",
+      "Density is Clarity: High-density information design for expert users (SREs/DBAs).",
+      "Data as Art: Charts and metrics are the primary visual elements.",
+      "Retro-Futurism: Terminal-inspired details (scanlines, monospace) mixed with modern glassmorphism."
+    ],
+    "anti_patterns": [
+      "No 'Card Salad': Don't just dump cards on a white background.",
+      "No 'Soft SaaS' Gradients: Avoid extensive purple/pink blurs. Stick to sharp, technical colors.",
+      "No Generic Fonts: Use Space Grotesk for Headings, JetBrains Mono for ALL data.",
+      "No Empty Space: In a NOC, black space is wasted space. Use bento grids."
+    ]
+  },
+  "theme": {
+    "mode": "dark",
+    "background": "#0B0F14",
+    "surfaces": {
+      "card": "#121826",
+      "card_hover": "#161D2E",
+      "sidebar": "#080A0F",
+      "header": "rgba(11, 15, 20, 0.7)",
+      "border": "#2D3748"
+    },
+    "colors": {
+      "primary": {
+        "gold": "#F5B841",
+        "cyan": "#00E0FF",
+        "emerald": "#10B981",
+        "purple": "#8B5CF6",
+        "amber": "#F59E0B"
+      },
+      "status": {
+        "healthy": "#00C853",
+        "warning": "#FFB300",
+        "critical": "#D32F2F",
+        "neutral": "#94A3B8"
+      },
+      "text": {
+        "primary": "#FFFFFF",
+        "secondary": "#94A3B8",
+        "muted": "#64748B",
+        "accent": "#00E0FF"
+      }
+    }
+  },
+  "typography": {
+    "font_families": {
+      "heading": "Space Grotesk, sans-serif",
+      "body": "Inter, sans-serif",
+      "mono": "JetBrains Mono, monospace"
+    },
+    "usage": {
+      "h1": "text-4xl font-heading font-bold tracking-tight text-white",
+      "h2": "text-2xl font-heading font-semibold tracking-tight text-white",
+      "h3": "text-xl font-heading font-medium text-white",
+      "body": "text-sm font-body text-slate-300",
+      "label": "text-xs font-mono uppercase tracking-wider text-slate-500",
+      "data": "font-mono font-medium"
+    }
+  },
+  "layout_strategy": {
+    "global": {
+      "type": "sidebar-layout",
+      "sidebar_width": "w-64",
+      "content_padding": "p-6",
+      "max_width": "max-w-[1920px]"
+    },
+    "grid_system": {
+      "dashboard_overview": "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6",
+      "detail_view": "grid grid-cols-12 gap-6"
+    },
+    "spacing": {
+      "container_padding": "p-6",
+      "item_gap": "gap-4",
+      "section_gap": "gap-8"
+    }
+  },
+  "navigation_structure": {
+    "sidebar": [
+      {
+        "label": "Command",
+        "icon": "LayoutDashboard",
+        "path": "/dashboard",
+        "children": [
+          { "label": "NOC Wallboard", "path": "/wallboard" },
+          { "label": "Incidents", "path": "/incidents" }
+        ]
+      },
+      {
+        "label": "Monitoring",
+        "icon": "Activity",
+        "path": "/monitoring",
+        "children": [
+          { "label": "Databases", "path": "/db-monitoring" },
+          { "label": "Servers", "path": "/servers" },
+          { "label": "APM", "path": "/apm" }
+        ]
+      },
+      {
+        "label": "Observability",
+        "icon": "Eye",
+        "path": "/logs",
+        "children": [
+          { "label": "Logs", "path": "/logs" },
+          { "label": "Topology", "path": "/topology" },
+          { "label": "Metrics", "path": "/metrics-explorer" }
+        ]
+      },
+      {
+        "label": "AI Ops",
+        "icon": "BrainCircuit",
+        "path": "/aiops-brain",
+        "children": [
+          { "label": "Predictions", "path": "/capacity-prediction" },
+          { "label": "Root Cause", "path": "/event-analyzer" }
+        ]
+      },
+      {
+        "label": "Automation",
+        "icon": "Bot",
+        "path": "/runbooks",
+        "children": [
+          { "label": "Runbooks", "path": "/runbooks" }
+        ]
+      },
+      {
+        "label": "Enterprise",
+        "icon": "Building2",
+        "path": "/settings",
+        "children": [
+          { "label": "Settings", "path": "/settings" },
+          { "label": "Reports", "path": "/reports" }
+        ]
+      }
+    ]
+  },
+  "components": {
+    "DBInstanceCard": {
+      "description": "High-density card summarizing a DB instance health.",
+      "structure": "Header (Name, Type, Status), Middle (Health Score Donut + Sparklines), Footer (Tags, Uptime)",
+      "styles": "bg-card border border-border/50 hover:border-primary/50 transition-colors"
+    },
+    "StatusBadge": {
+      "description": "Pill-shaped indicator with glowing dot.",
+      "variants": {
+        "healthy": "bg-emerald-500/10 text-emerald-500 border-emerald-500/20",
+        "warning": "bg-amber-500/10 text-amber-500 border-amber-500/20",
+        "critical": "bg-red-500/10 text-red-500 border-red-500/20"
+      }
+    },
+    "MetricChart": {
+      "description": "Recharts AreaChart with gradient fill.",
+      "defaults": {
+        "strokeWidth": 2,
+        "fillOpacity": 0.1,
+        "grid": false,
+        "tooltip": "Custom minimalist tooltip"
+      }
+    },
+    "DataGrid": {
+      "description": "Dense table for queries/locks.",
+      "styles": "w-full text-sm font-mono border-collapse"
+    }
+  },
+  "visual_enhancers": {
+    "glass_headers": "backdrop-blur-xl bg-background/80 border-b border-white/5 sticky top-0 z-50",
+    "scanlines": "pointer-events-none fixed inset-0 z-[100] bg-[linear-gradient(rgba(18,16,16,0)_50%,rgba(0,0,0,0.25)_50%),linear-gradient(90deg,rgba(255,0,0,0.06),rgba(0,255,0,0.02),rgba(0,0,255,0.06))] bg-[length:100%_4px,3px_100%] opacity-20",
+    "glow_effects": "shadow-[0_0_20px_rgba(0,224,255,0.15)] for active elements"
+  },
+  "instructions_to_main_agent": [
+    "1. IMPLEMENTATION ORDER: Navigation Sidebar Clean-up -> Database Monitoring Overview (Fleet) -> Database Detail View.",
+    "2. SIDEBAR: Refactor the sidebar to strictly follow the 'navigation_structure' defined above. Remove duplicates.",
+    "3. OVERVIEW PAGE: Implement the Bento Grid layout. Use the 'DBInstanceCard' component for each database.",
+    "4. DETAIL PAGE: Create a layout with a sticky header showing instance summary. Use Tabs for: 'Performance', 'Queries & Locks', 'Custom Metrics', 'Settings & Agent'.",
+    "5. TABS LOGIC:",
+    "   - Performance: 4x2 grid of time-series charts (CPU, Mem, IO, Network, Connections).",
+    "   - Queries & Locks: Split view. Top: Table of slow queries. Bottom: Lock analysis timeline.",
+    "   - Custom Metrics: Grid of user-defined charts.",
+    "   - Settings & Agent: Form for settings + Status card for Agent (Health, Version, Logs).",
+    "6. AGENT HEALTH: Ensure every DB card and detail header shows a distinct 'Agent Status' indicator (Online/Offline/Syncing).",
+    "7. DATA MOCKING: Create a comprehensive mock data file 'mock_db_data.js' to power these views if APIs are missing.",
+    "8. CHARTS: Use Recharts. Style them to match the 'Obsidian' theme (dark tooltips, no grid lines, neon strokes)."
+  ],
+  "universal_guidelines": {
+    "motion": "Use framer-motion for page transitions and list entry (staggerChildren).",
+    "accessibility": "Ensure all interactive elements have aria-labels. Use widely supported colors for status (R/G/B) but add text labels.",
+    "toasts": "Use 'sonner' for all notifications.",
+    "icons": "Use 'lucide-react' for all UI icons. Use 'phosphor-icons' only if specific technical icons are missing."
+  }
+}

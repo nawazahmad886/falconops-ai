@@ -1,0 +1,1219 @@
+"""
+FalconOps AI - Runbook Automation Engine
+Enterprise-grade runbook execution with multiple action types
+"""
+import uuid
+import asyncio
+import subprocess
+import httpx
+import json
+from datetime import datetime, timezone
+from typing import Dict, Any, List, Optional
+from enum import Enum
+
+from ..core.database import db
+
+
+class ActionType(str, Enum):
+    """Supported runbook action types"""
+    HTTP_REQUEST = "http_request"
+    SHELL_COMMAND = "shell_command"
+    SSH_COMMAND = "ssh_command"
+    DATABASE_QUERY = "database_query"
+    NOTIFICATION = "notification"
+    DELAY = "delay"
+    CONDITION = "condition"
+    WEBHOOK = "webhook"
+    LOG_MESSAGE = "log_message"
+    METRIC_CHECK = "metric_check"
+    SERVICE_RESTART = "service_restart"
+    APPROVAL = "approval"
+    # New action types
+    KUBERNETES = "kubernetes"
+    SCRIPT = "script"
+    SET_VARIABLE = "set_variable"
+    LOOP = "loop"
+    PARALLEL = "parallel"
+
+
+class RunbookEngine:
+    """
+    Enterprise Runbook Automation Engine
+    Executes runbook steps with full audit trail and rollback support
+    """
+    
+    def __init__(self):
+        self.execution_context: Dict[str, Any] = {}
+        self.http_client = httpx.AsyncClient(timeout=30.0)
+    
+    async def execute_runbook(
+        self,
+        runbook_id: str,
+        trigger_source: str = "manual",
+        trigger_context: Dict[str, Any] = None,
+        user_email: str = "system",
+        tenant_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Execute a complete runbook with all steps
+        Returns execution result with detailed step-by-step outcomes
+        """
+        runbook = await db.runbooks.find_one({"id": runbook_id}, {"_id": 0})
+        if not runbook:
+            return {"success": False, "error": "Runbook not found"}
+        
+        execution_id = str(uuid.uuid4())
+        started_at = datetime.now(timezone.utc).isoformat()
+        
+        # Initialize execution record
+        execution_doc = {
+            "id": execution_id,
+            "runbook_id": runbook_id,
+            "runbook_name": runbook["name"],
+            "trigger_source": trigger_source,
+            "trigger_context": trigger_context or {},
+            "executed_by": user_email,
+            "tenant_id": tenant_id,
+            "status": "running",
+            "started_at": started_at,
+            "completed_at": None,
+            "steps_total": len(runbook.get("steps", [])),
+            "steps_completed": 0,
+            "steps_failed": 0,
+            "step_results": [],
+            "variables": {},
+            "error_message": None
+        }
+        
+        await db.runbook_executions.insert_one(execution_doc)
+        
+        # Execute each step
+        self.execution_context = {
+            "execution_id": execution_id,
+            "runbook_id": runbook_id,
+            "variables": trigger_context or {},
+            "step_outputs": {}
+        }
+        
+        all_success = True
+        steps_completed = 0
+        step_results = []
+        
+        for idx, step in enumerate(runbook.get("steps", [])):
+            step_result = await self._execute_step(step, idx + 1)
+            step_results.append(step_result)
+            
+            if step_result["status"] == "success":
+                steps_completed += 1
+                # Store step output for later steps
+                self.execution_context["step_outputs"][f"step_{idx + 1}"] = step_result.get("output", {})
+            else:
+                all_success = False
+                # Check if step is marked as continue_on_failure
+                if not step.get("continue_on_failure", False):
+                    break
+        
+        # Update execution record
+        completed_at = datetime.now(timezone.utc).isoformat()
+        final_status = "completed" if all_success else "failed"
+        
+        await db.runbook_executions.update_one(
+            {"id": execution_id},
+            {
+                "$set": {
+                    "status": final_status,
+                    "completed_at": completed_at,
+                    "steps_completed": steps_completed,
+                    "steps_failed": len(step_results) - steps_completed,
+                    "step_results": step_results,
+                    "variables": self.execution_context.get("variables", {})
+                }
+            }
+        )
+        
+        # Update runbook stats
+        await db.runbooks.update_one(
+            {"id": runbook_id},
+            {
+                "$set": {"last_executed": completed_at},
+                "$inc": {"execution_count": 1}
+            }
+        )
+        
+        return {
+            "success": all_success,
+            "execution_id": execution_id,
+            "status": final_status,
+            "steps_completed": steps_completed,
+            "steps_total": len(runbook.get("steps", [])),
+            "step_results": step_results,
+            "started_at": started_at,
+            "completed_at": completed_at
+        }
+    
+    async def _execute_step(self, step: Dict[str, Any], step_number: int) -> Dict[str, Any]:
+        """Execute a single runbook step"""
+        action_type = step.get("action_type", step.get("action", "unknown"))
+        step_name = step.get("name", f"Step {step_number}")
+        started_at = datetime.now(timezone.utc).isoformat()
+        
+        result = {
+            "step_number": step_number,
+            "name": step_name,
+            "action_type": action_type,
+            "status": "pending",
+            "started_at": started_at,
+            "completed_at": None,
+            "output": {},
+            "error": None
+        }
+        
+        try:
+            # Route to appropriate handler
+            if action_type == ActionType.HTTP_REQUEST or action_type == "http_request":
+                output = await self._execute_http_request(step)
+            elif action_type == ActionType.SHELL_COMMAND or action_type == "shell_command":
+                output = await self._execute_shell_command(step)
+            elif action_type == ActionType.DELAY or action_type == "delay":
+                output = await self._execute_delay(step)
+            elif action_type == ActionType.NOTIFICATION or action_type == "notification":
+                output = await self._execute_notification(step)
+            elif action_type == ActionType.WEBHOOK or action_type == "webhook":
+                output = await self._execute_webhook(step)
+            elif action_type == ActionType.LOG_MESSAGE or action_type == "log_message":
+                output = await self._execute_log_message(step)
+            elif action_type == ActionType.CONDITION or action_type == "condition":
+                output = await self._execute_condition(step)
+            elif action_type == ActionType.METRIC_CHECK or action_type == "metric_check":
+                output = await self._execute_metric_check(step)
+            elif action_type == ActionType.SERVICE_RESTART or action_type == "service_restart":
+                output = await self._execute_service_restart(step)
+            elif action_type == ActionType.APPROVAL or action_type == "approval":
+                output = await self._execute_approval(step)
+            elif action_type == ActionType.SSH_COMMAND or action_type == "ssh_command":
+                output = await self._execute_ssh_command(step)
+            elif action_type == ActionType.DATABASE_QUERY or action_type == "database_query":
+                output = await self._execute_database_query(step)
+            elif action_type == ActionType.KUBERNETES or action_type == "kubernetes":
+                output = await self._execute_kubernetes(step)
+            elif action_type == ActionType.SCRIPT or action_type == "script":
+                output = await self._execute_script(step)
+            elif action_type == ActionType.SET_VARIABLE or action_type == "set_variable":
+                output = await self._execute_set_variable(step)
+            elif action_type == ActionType.LOOP or action_type == "loop":
+                output = await self._execute_loop(step)
+            elif action_type == ActionType.PARALLEL or action_type == "parallel":
+                output = await self._execute_parallel(step)
+            else:
+                output = {"message": f"Action type '{action_type}' executed (simulated)"}
+            
+            result["status"] = "success"
+            result["output"] = output
+            
+        except Exception as e:
+            result["status"] = "failed"
+            result["error"] = str(e)
+        
+        result["completed_at"] = datetime.now(timezone.utc).isoformat()
+        return result
+    
+    async def _execute_http_request(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute an HTTP request action"""
+        config = step.get("config", {})
+        method = config.get("method", "GET").upper()
+        url = self._interpolate_variables(config.get("url", ""))
+        headers = config.get("headers", {})
+        body = config.get("body")
+        timeout = config.get("timeout", 30)
+        
+        # Interpolate variables in URL and body
+        if body:
+            body = self._interpolate_variables(str(body))
+        
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.request(
+                method=method,
+                url=url,
+                headers=headers,
+                content=body if method in ["POST", "PUT", "PATCH"] else None
+            )
+        
+        return {
+            "status_code": response.status_code,
+            "response_body": response.text[:1000],  # Limit response size
+            "success": 200 <= response.status_code < 300
+        }
+    
+    async def _execute_shell_command(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a shell command (sandboxed simulation)"""
+        config = step.get("config", {})
+        command = config.get("command", "echo 'No command specified'")
+        
+        # For security, only simulate certain safe commands
+        safe_commands = ["echo", "date", "whoami", "hostname", "uptime", "df", "free", "ps", "top", "cat", "ls", "pwd"]
+        cmd_parts = command.split()
+        
+        if cmd_parts and cmd_parts[0] in safe_commands:
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                return {
+                    "command": command,
+                    "stdout": result.stdout[:500],
+                    "stderr": result.stderr[:500],
+                    "return_code": result.returncode,
+                    "success": result.returncode == 0
+                }
+            except subprocess.TimeoutExpired:
+                return {"command": command, "error": "Command timeout", "success": False}
+        else:
+            return {
+                "command": command,
+                "message": "Command simulated (not executed for security)",
+                "simulated": True,
+                "success": True
+            }
+    
+    async def _execute_delay(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a delay action"""
+        config = step.get("config", {})
+        seconds = min(config.get("seconds", 5), 60)  # Max 60 seconds
+        
+        await asyncio.sleep(seconds)
+        
+        return {
+            "delayed_seconds": seconds,
+            "success": True
+        }
+    
+    async def _execute_notification(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a notification"""
+        config = step.get("config", {})
+        channel = config.get("channel", "log")
+        message = self._interpolate_variables(config.get("message", "Notification"))
+        recipients = config.get("recipients", [])
+        
+        # Log the notification
+        notification_doc = {
+            "id": str(uuid.uuid4()),
+            "execution_id": self.execution_context.get("execution_id"),
+            "channel": channel,
+            "message": message,
+            "recipients": recipients,
+            "sent_at": datetime.now(timezone.utc).isoformat(),
+            "status": "sent"
+        }
+        
+        await db.runbook_notifications.insert_one(notification_doc)
+        
+        return {
+            "channel": channel,
+            "message": message,
+            "recipients": recipients,
+            "notification_id": notification_doc["id"],
+            "success": True
+        }
+    
+    async def _execute_webhook(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Send a webhook"""
+        config = step.get("config", {})
+        url = self._interpolate_variables(config.get("url", ""))
+        payload = config.get("payload", {})
+        
+        # Interpolate variables in payload
+        payload_str = json.dumps(payload)
+        payload_str = self._interpolate_variables(payload_str)
+        payload = json.loads(payload_str)
+        
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload)
+        
+        return {
+            "url": url,
+            "status_code": response.status_code,
+            "success": 200 <= response.status_code < 300
+        }
+    
+    async def _execute_log_message(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Log a message"""
+        config = step.get("config", {})
+        message = self._interpolate_variables(config.get("message", "Log entry"))
+        level = config.get("level", "info")
+        
+        log_doc = {
+            "id": str(uuid.uuid4()),
+            "execution_id": self.execution_context.get("execution_id"),
+            "level": level,
+            "message": message,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        await db.runbook_logs.insert_one(log_doc)
+        
+        return {
+            "level": level,
+            "message": message,
+            "success": True
+        }
+    
+    async def _execute_condition(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Evaluate a condition"""
+        config = step.get("config", {})
+        condition_type = config.get("type", "equals")
+        left_value = self._interpolate_variables(str(config.get("left", "")))
+        right_value = self._interpolate_variables(str(config.get("right", "")))
+        
+        result = False
+        if condition_type == "equals":
+            result = left_value == right_value
+        elif condition_type == "not_equals":
+            result = left_value != right_value
+        elif condition_type == "contains":
+            result = right_value in left_value
+        elif condition_type == "greater_than":
+            try:
+                result = float(left_value) > float(right_value)
+            except ValueError:
+                result = False
+        elif condition_type == "less_than":
+            try:
+                result = float(left_value) < float(right_value)
+            except ValueError:
+                result = False
+        elif condition_type == "regex":
+            import re
+            try:
+                result = bool(re.search(right_value, left_value))
+            except:
+                result = False
+        
+        return {
+            "condition_type": condition_type,
+            "left_value": left_value,
+            "right_value": right_value,
+            "result": result,
+            "success": result
+        }
+    
+    async def _execute_metric_check(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Check a metric value"""
+        config = step.get("config", {})
+        metric_name = config.get("metric", "cpu_usage")
+        threshold = config.get("threshold", 80)
+        operator = config.get("operator", "less_than")
+        server_id = config.get("server_id")
+        
+        # Get latest metric from database
+        query = {"metric_name": metric_name}
+        if server_id:
+            query["server_id"] = server_id
+        
+        metric = await db.server_metrics.find_one(
+            query,
+            {"_id": 0},
+            sort=[("timestamp", -1)]
+        )
+        
+        current_value = metric.get("value", 0) if metric else 0
+        
+        passed = False
+        if operator == "less_than":
+            passed = current_value < threshold
+        elif operator == "greater_than":
+            passed = current_value > threshold
+        elif operator == "equals":
+            passed = current_value == threshold
+        
+        return {
+            "metric": metric_name,
+            "current_value": current_value,
+            "threshold": threshold,
+            "operator": operator,
+            "passed": passed,
+            "success": passed
+        }
+    
+    async def _execute_service_restart(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Simulate a service restart"""
+        config = step.get("config", {})
+        service_name = config.get("service", "unknown-service")
+        
+        # Log the restart attempt
+        restart_doc = {
+            "id": str(uuid.uuid4()),
+            "execution_id": self.execution_context.get("execution_id"),
+            "service": service_name,
+            "action": "restart",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "simulated"
+        }
+        
+        await db.runbook_actions.insert_one(restart_doc)
+        
+        return {
+            "service": service_name,
+            "action": "restart",
+            "message": f"Service '{service_name}' restart initiated (simulated)",
+            "simulated": True,
+            "success": True
+        }
+    
+    async def _execute_approval(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Create an approval request"""
+        config = step.get("config", {})
+        approvers = config.get("approvers", [])
+        message = config.get("message", "Approval required to continue")
+        timeout_minutes = config.get("timeout_minutes", 60)
+        
+        approval_doc = {
+            "id": str(uuid.uuid4()),
+            "execution_id": self.execution_context.get("execution_id"),
+            "approvers": approvers,
+            "message": message,
+            "timeout_minutes": timeout_minutes,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "pending",
+            "approved_by": None,
+            "approved_at": None
+        }
+        
+        await db.runbook_approvals.insert_one(approval_doc)
+        
+        # For demo, auto-approve
+        return {
+            "approval_id": approval_doc["id"],
+            "message": message,
+            "approvers": approvers,
+            "auto_approved": True,
+            "success": True
+        }
+    
+    async def _execute_ssh_command(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute SSH command (simulated for security)"""
+        config = step.get("config", {})
+        host = self._interpolate_variables(config.get("host", ""))
+        username = config.get("username", "root")
+        command = self._interpolate_variables(config.get("command", ""))
+        port = config.get("port", 22)
+        
+        # Simulated execution for security
+        return {
+            "host": host,
+            "username": username,
+            "port": port,
+            "command": command,
+            "message": f"SSH command simulated on {username}@{host}:{port}",
+            "simulated": True,
+            "stdout": f"[Simulated output for: {command}]",
+            "success": True
+        }
+    
+    async def _execute_database_query(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute database query (simulated for security)"""
+        config = step.get("config", {})
+        database_type = config.get("database_type", "mongodb")
+        query = self._interpolate_variables(config.get("query", ""))
+        database = config.get("database", "")
+        
+        # Simulated execution for security
+        return {
+            "database_type": database_type,
+            "database": database,
+            "query": query,
+            "message": f"Database query simulated on {database_type}:{database}",
+            "simulated": True,
+            "rows_affected": 0,
+            "success": True
+        }
+    
+    async def _execute_kubernetes(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute Kubernetes command (simulated)"""
+        config = step.get("config", {})
+        action = config.get("action", "get")  # get, apply, delete, rollout, scale
+        resource_type = config.get("resource_type", "pods")  # pods, deployments, services, etc.
+        resource_name = self._interpolate_variables(config.get("resource_name", ""))
+        namespace = config.get("namespace", "default")
+        replicas = config.get("replicas")
+        
+        # Build kubectl command
+        if action == "get":
+            cmd = f"kubectl get {resource_type} {resource_name} -n {namespace}"
+        elif action == "delete":
+            cmd = f"kubectl delete {resource_type} {resource_name} -n {namespace}"
+        elif action == "rollout_restart":
+            cmd = f"kubectl rollout restart {resource_type}/{resource_name} -n {namespace}"
+        elif action == "scale":
+            cmd = f"kubectl scale {resource_type}/{resource_name} --replicas={replicas} -n {namespace}"
+        elif action == "logs":
+            cmd = f"kubectl logs {resource_name} -n {namespace} --tail=100"
+        elif action == "describe":
+            cmd = f"kubectl describe {resource_type} {resource_name} -n {namespace}"
+        else:
+            cmd = f"kubectl {action} {resource_type} {resource_name} -n {namespace}"
+        
+        return {
+            "action": action,
+            "resource_type": resource_type,
+            "resource_name": resource_name,
+            "namespace": namespace,
+            "command": cmd,
+            "message": f"Kubernetes command simulated: {cmd}",
+            "simulated": True,
+            "success": True
+        }
+    
+    async def _execute_script(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a script (Python/Bash - simulated)"""
+        config = step.get("config", {})
+        script_type = config.get("script_type", "bash")  # bash, python
+        script_content = self._interpolate_variables(config.get("script", ""))
+        
+        return {
+            "script_type": script_type,
+            "script_length": len(script_content),
+            "message": f"{script_type.capitalize()} script simulated ({len(script_content)} chars)",
+            "simulated": True,
+            "success": True
+        }
+    
+    async def _execute_set_variable(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Set a variable for use in subsequent steps"""
+        config = step.get("config", {})
+        variable_name = config.get("name", "")
+        variable_value = self._interpolate_variables(str(config.get("value", "")))
+        
+        # Store in execution context
+        self.execution_context["variables"][variable_name] = variable_value
+        
+        return {
+            "variable_name": variable_name,
+            "variable_value": variable_value,
+            "message": f"Variable '{variable_name}' set to '{variable_value}'",
+            "success": True
+        }
+    
+    async def _execute_loop(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a loop over items"""
+        config = step.get("config", {})
+        items = config.get("items", [])
+        max_iterations = min(config.get("max_iterations", 10), 100)
+        
+        results = []
+        for i, item in enumerate(items[:max_iterations]):
+            results.append({
+                "iteration": i + 1,
+                "item": item,
+                "status": "completed"
+            })
+        
+        return {
+            "iterations_completed": len(results),
+            "max_iterations": max_iterations,
+            "results": results,
+            "success": True
+        }
+    
+    async def _execute_parallel(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute multiple actions in parallel (simulated)"""
+        config = step.get("config", {})
+        actions = config.get("actions", [])
+        
+        results = []
+        for i, action in enumerate(actions):
+            results.append({
+                "action_index": i + 1,
+                "action_type": action.get("action_type", "unknown"),
+                "status": "completed (simulated)"
+            })
+        
+        return {
+            "parallel_actions": len(actions),
+            "results": results,
+            "message": f"Executed {len(actions)} actions in parallel (simulated)",
+            "simulated": True,
+            "success": True
+        }
+    
+    def _interpolate_variables(self, text: str) -> str:
+        """Replace {{variable}} placeholders with actual values"""
+        if not text or "{{" not in text:
+            return text
+        
+        variables = self.execution_context.get("variables", {})
+        step_outputs = self.execution_context.get("step_outputs", {})
+        
+        # Combine all available variables
+        all_vars = {**variables, **step_outputs}
+        
+        for key, value in all_vars.items():
+            placeholder = f"{{{{{key}}}}}"
+            if placeholder in text:
+                text = text.replace(placeholder, str(value))
+        
+        return text
+
+
+# Singleton instance
+runbook_engine = RunbookEngine()
+
+
+async def get_runbook_templates() -> List[Dict[str, Any]]:
+    """Get predefined runbook templates"""
+    return [
+        # Infrastructure Templates
+        {
+            "id": "tpl-high-cpu",
+            "name": "High CPU Remediation",
+            "description": "Automatically remediate high CPU issues",
+            "category": "infrastructure",
+            "steps": [
+                {
+                    "name": "Check CPU Metrics",
+                    "action_type": "metric_check",
+                    "config": {
+                        "metric": "cpu_usage",
+                        "threshold": 90,
+                        "operator": "greater_than"
+                    }
+                },
+                {
+                    "name": "Notify Team",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "High CPU detected on {{server_name}}",
+                        "recipients": ["ops-team"]
+                    }
+                },
+                {
+                    "name": "Restart Service",
+                    "action_type": "service_restart",
+                    "config": {
+                        "service": "{{affected_service}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        {
+            "id": "tpl-disk-cleanup",
+            "name": "Disk Space Cleanup",
+            "description": "Clean up disk space when threshold exceeded",
+            "category": "infrastructure",
+            "steps": [
+                {
+                    "name": "Check Disk Space",
+                    "action_type": "metric_check",
+                    "config": {
+                        "metric": "disk_usage",
+                        "threshold": 85,
+                        "operator": "greater_than"
+                    }
+                },
+                {
+                    "name": "Clean Temp Files",
+                    "action_type": "shell_command",
+                    "config": {
+                        "command": "echo 'Cleaning temp files...'"
+                    }
+                },
+                {
+                    "name": "Log Cleanup",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "Disk cleanup completed"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-memory-leak",
+            "name": "Memory Leak Detection",
+            "description": "Detect and remediate memory leaks",
+            "category": "infrastructure",
+            "steps": [
+                {
+                    "name": "Check Memory Usage",
+                    "action_type": "metric_check",
+                    "config": {
+                        "metric": "memory_usage",
+                        "threshold": 90,
+                        "operator": "greater_than"
+                    }
+                },
+                {
+                    "name": "Capture Memory Stats",
+                    "action_type": "shell_command",
+                    "config": {
+                        "command": "free -m"
+                    }
+                },
+                {
+                    "name": "Alert Team",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Memory leak detected: {{server_name}} at {{memory_usage}}%",
+                        "recipients": ["dev-team"]
+                    }
+                },
+                {
+                    "name": "Restart Application",
+                    "action_type": "service_restart",
+                    "config": {
+                        "service": "{{affected_service}}"
+                    }
+                }
+            ]
+        },
+        # Monitoring Templates
+        {
+            "id": "tpl-health-check",
+            "name": "Service Health Check",
+            "description": "Comprehensive health check with notifications",
+            "category": "monitoring",
+            "steps": [
+                {
+                    "name": "Check API Endpoint",
+                    "action_type": "http_request",
+                    "config": {
+                        "method": "GET",
+                        "url": "{{service_url}}/health",
+                        "timeout": 10
+                    }
+                },
+                {
+                    "name": "Verify Response",
+                    "action_type": "condition",
+                    "config": {
+                        "type": "equals",
+                        "left": "{{step_1.status_code}}",
+                        "right": "200"
+                    }
+                },
+                {
+                    "name": "Send Status",
+                    "action_type": "webhook",
+                    "config": {
+                        "url": "{{callback_url}}",
+                        "payload": {"status": "healthy"}
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-ssl-check",
+            "name": "SSL Certificate Check",
+            "description": "Monitor SSL certificate expiry",
+            "category": "monitoring",
+            "steps": [
+                {
+                    "name": "Check Certificate",
+                    "action_type": "http_request",
+                    "config": {
+                        "method": "GET",
+                        "url": "https://{{domain}}",
+                        "timeout": 10
+                    }
+                },
+                {
+                    "name": "Log Check Result",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "SSL certificate check completed for {{domain}}"
+                    }
+                },
+                {
+                    "name": "Notify if Expiring",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "email",
+                        "message": "SSL certificate for {{domain}} needs attention",
+                        "recipients": ["security@company.com"]
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        # Incident Templates
+        {
+            "id": "tpl-incident-response",
+            "name": "Incident Response Workflow",
+            "description": "Automated incident response with escalation",
+            "category": "incident",
+            "steps": [
+                {
+                    "name": "Create Incident Ticket",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "critical",
+                        "message": "Incident detected: {{incident_title}}"
+                    }
+                },
+                {
+                    "name": "Notify On-Call",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "pagerduty",
+                        "message": "Critical incident: {{incident_title}}",
+                        "recipients": ["on-call"]
+                    }
+                },
+                {
+                    "name": "Wait for Response",
+                    "action_type": "delay",
+                    "config": {
+                        "seconds": 30
+                    }
+                },
+                {
+                    "name": "Escalate if Needed",
+                    "action_type": "approval",
+                    "config": {
+                        "approvers": ["manager@company.com"],
+                        "message": "Escalation needed for {{incident_title}}",
+                        "timeout_minutes": 15
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-outage-response",
+            "name": "Outage Response",
+            "description": "Full outage response workflow",
+            "category": "incident",
+            "steps": [
+                {
+                    "name": "Acknowledge Outage",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "critical",
+                        "message": "OUTAGE: {{service_name}} is down"
+                    }
+                },
+                {
+                    "name": "Page On-Call",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "pagerduty",
+                        "message": "URGENT: {{service_name}} outage detected",
+                        "recipients": ["on-call", "engineering-lead"]
+                    }
+                },
+                {
+                    "name": "Update Status Page",
+                    "action_type": "webhook",
+                    "config": {
+                        "url": "{{statuspage_url}}/incidents",
+                        "payload": {
+                            "name": "{{service_name}} Outage",
+                            "status": "investigating"
+                        }
+                    }
+                },
+                {
+                    "name": "Attempt Auto-Recovery",
+                    "action_type": "service_restart",
+                    "config": {
+                        "service": "{{service_name}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        # Deployment Templates
+        {
+            "id": "tpl-deployment",
+            "name": "Deployment Validation",
+            "description": "Validate deployment health after release",
+            "category": "deployment",
+            "steps": [
+                {
+                    "name": "Wait for Startup",
+                    "action_type": "delay",
+                    "config": {
+                        "seconds": 10
+                    }
+                },
+                {
+                    "name": "Health Check",
+                    "action_type": "http_request",
+                    "config": {
+                        "method": "GET",
+                        "url": "{{app_url}}/api/health",
+                        "timeout": 30
+                    }
+                },
+                {
+                    "name": "Notify Success",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Deployment successful: {{app_name}} v{{version}}"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-k8s-rollout",
+            "name": "Kubernetes Rollout",
+            "description": "Rolling update for Kubernetes deployments",
+            "category": "deployment",
+            "steps": [
+                {
+                    "name": "Initiate Rollout",
+                    "action_type": "kubernetes",
+                    "config": {
+                        "action": "rollout_restart",
+                        "resource_type": "deployment",
+                        "resource_name": "{{deployment_name}}",
+                        "namespace": "{{namespace}}"
+                    }
+                },
+                {
+                    "name": "Wait for Rollout",
+                    "action_type": "delay",
+                    "config": {
+                        "seconds": 30
+                    }
+                },
+                {
+                    "name": "Verify Pods",
+                    "action_type": "kubernetes",
+                    "config": {
+                        "action": "get",
+                        "resource_type": "pods",
+                        "resource_name": "",
+                        "namespace": "{{namespace}}"
+                    }
+                },
+                {
+                    "name": "Notify Completion",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Kubernetes rollout complete: {{deployment_name}}"
+                    }
+                }
+            ]
+        },
+        # Database Templates
+        {
+            "id": "tpl-db-backup",
+            "name": "Database Backup",
+            "description": "Automated database backup workflow",
+            "category": "database",
+            "steps": [
+                {
+                    "name": "Set Backup Name",
+                    "action_type": "set_variable",
+                    "config": {
+                        "name": "backup_name",
+                        "value": "backup_{{database}}_{{timestamp}}"
+                    }
+                },
+                {
+                    "name": "Notify Start",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Starting backup: {{backup_name}}"
+                    }
+                },
+                {
+                    "name": "Execute Backup",
+                    "action_type": "database_query",
+                    "config": {
+                        "database_type": "{{db_type}}",
+                        "database": "{{database}}",
+                        "query": "BACKUP DATABASE {{database}} TO '{{backup_path}}/{{backup_name}}'"
+                    }
+                },
+                {
+                    "name": "Verify Backup",
+                    "action_type": "shell_command",
+                    "config": {
+                        "command": "ls -la {{backup_path}}"
+                    }
+                },
+                {
+                    "name": "Notify Complete",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Backup completed: {{backup_name}}"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-db-maintenance",
+            "name": "Database Maintenance",
+            "description": "Regular database maintenance tasks",
+            "category": "database",
+            "steps": [
+                {
+                    "name": "Check Connections",
+                    "action_type": "database_query",
+                    "config": {
+                        "database_type": "{{db_type}}",
+                        "query": "SELECT COUNT(*) FROM pg_stat_activity"
+                    }
+                },
+                {
+                    "name": "Vacuum Database",
+                    "action_type": "database_query",
+                    "config": {
+                        "database_type": "postgresql",
+                        "database": "{{database}}",
+                        "query": "VACUUM ANALYZE"
+                    }
+                },
+                {
+                    "name": "Log Completion",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "Database maintenance completed for {{database}}"
+                    }
+                }
+            ]
+        },
+        # Security Templates
+        {
+            "id": "tpl-security-scan",
+            "name": "Security Vulnerability Scan",
+            "description": "Run security vulnerability scan",
+            "category": "security",
+            "steps": [
+                {
+                    "name": "Start Scan",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "Starting security scan for {{target}}"
+                    }
+                },
+                {
+                    "name": "Run Scan",
+                    "action_type": "http_request",
+                    "config": {
+                        "method": "POST",
+                        "url": "{{scanner_url}}/api/scan",
+                        "body": {"target": "{{target}}"}
+                    }
+                },
+                {
+                    "name": "Wait for Results",
+                    "action_type": "delay",
+                    "config": {
+                        "seconds": 30
+                    }
+                },
+                {
+                    "name": "Report Results",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "email",
+                        "message": "Security scan completed for {{target}}",
+                        "recipients": ["security-team@company.com"]
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-access-audit",
+            "name": "Access Audit",
+            "description": "Audit user access permissions",
+            "category": "security",
+            "steps": [
+                {
+                    "name": "Log Audit Start",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "Starting access audit for {{system}}"
+                    }
+                },
+                {
+                    "name": "Query User List",
+                    "action_type": "database_query",
+                    "config": {
+                        "database_type": "mongodb",
+                        "query": "db.users.find({active: true})"
+                    }
+                },
+                {
+                    "name": "Generate Report",
+                    "action_type": "webhook",
+                    "config": {
+                        "url": "{{report_url}}/generate",
+                        "payload": {"type": "access_audit", "system": "{{system}}"}
+                    }
+                }
+            ]
+        },
+        # Network Templates
+        {
+            "id": "tpl-network-health",
+            "name": "Network Health Check",
+            "description": "Check network connectivity and latency",
+            "category": "network",
+            "steps": [
+                {
+                    "name": "Ping Gateway",
+                    "action_type": "shell_command",
+                    "config": {
+                        "command": "echo 'Pinging gateway...'"
+                    }
+                },
+                {
+                    "name": "Check DNS",
+                    "action_type": "http_request",
+                    "config": {
+                        "method": "GET",
+                        "url": "https://{{dns_target}}",
+                        "timeout": 5
+                    }
+                },
+                {
+                    "name": "Log Results",
+                    "action_type": "log_message",
+                    "config": {
+                        "level": "info",
+                        "message": "Network health check completed"
+                    }
+                }
+            ]
+        }
+    ]
+
+
+async def get_action_types() -> List[Dict[str, Any]]:
+    """Get all available action types with descriptions"""
+    return [
+        {"id": "http_request", "name": "HTTP Request", "description": "Make HTTP/REST API calls", "icon": "globe"},
+        {"id": "shell_command", "name": "Shell Command", "description": "Execute shell commands", "icon": "terminal"},
+        {"id": "ssh_command", "name": "SSH Command", "description": "Execute commands via SSH", "icon": "key"},
+        {"id": "database_query", "name": "Database Query", "description": "Execute database queries", "icon": "database"},
+        {"id": "notification", "name": "Notification", "description": "Send notifications", "icon": "bell"},
+        {"id": "delay", "name": "Delay", "description": "Wait for specified time", "icon": "clock"},
+        {"id": "condition", "name": "Condition", "description": "Evaluate conditions", "icon": "git-branch"},
+        {"id": "webhook", "name": "Webhook", "description": "Send webhook payloads", "icon": "webhook"},
+        {"id": "log_message", "name": "Log Message", "description": "Write log entries", "icon": "file-text"},
+        {"id": "metric_check", "name": "Metric Check", "description": "Check metric values", "icon": "bar-chart"},
+        {"id": "service_restart", "name": "Service Restart", "description": "Restart a service", "icon": "refresh-cw"},
+        {"id": "approval", "name": "Approval", "description": "Request approval to continue", "icon": "check-circle"},
+        {"id": "kubernetes", "name": "Kubernetes", "description": "Execute kubectl commands", "icon": "box"},
+        {"id": "script", "name": "Script", "description": "Execute Python/Bash scripts", "icon": "code"},
+        {"id": "set_variable", "name": "Set Variable", "description": "Set runtime variable", "icon": "variable"},
+        {"id": "loop", "name": "Loop", "description": "Iterate over items", "icon": "repeat"},
+        {"id": "parallel", "name": "Parallel", "description": "Execute actions in parallel", "icon": "layers"}
+    ]

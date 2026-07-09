@@ -1,0 +1,52 @@
+# FalconOpsAI OneAgent configuration
+# Docs: README.md · All values can be overridden with FALCONOPS_* env vars.
+
+# ── Required ────────────────────────────────────────────
+api_key: "REPLACE_WITH_YOUR_API_KEY"          # generate in FalconOps → Downloads → OneAgent
+backend_url: "https://your-falconops-instance.com"
+
+# ── Identity ────────────────────────────────────────────
+# hostname: ""                                # defaults to OS hostname
+environment: "production"                     # production | staging | dev
+tags:
+  # team: platform
+  # datacenter: eu-west-1
+
+# ── Plugins ─────────────────────────────────────────────
+enabled_plugins:
+  - logs
+  - metrics
+  - traces
+
+# ── Sampling / noise reduction ──────────────────────────
+sampling_rate: 1.0            # 0.0-1.0 probabilistic sampling of DEBUG/INFO logs
+                              # (WARN/ERROR are never sampled out; identical
+                              #  messages are auto rate-limited to 25/min)
+
+# ── Log collection ──────────────────────────────────────
+log_filters:
+  min_level: "info"           # debug | info | warn | error
+  include_services: []        # empty = all discovered sources
+  exclude_services: []
+  extra_paths:                # extra files/globs to tail
+    # - /opt/myapp/logs/*.log
+
+# ── Metrics ─────────────────────────────────────────────
+metrics_interval_sec: 30
+
+# ── Pipeline / buffering ────────────────────────────────
+batch_max_events: 500
+batch_max_wait_sec: 5
+buffer_dir: /var/lib/falconops/buffer
+buffer_max_mb: 256
+
+# ── Local listeners ─────────────────────────────────────
+otlp_listen_addr: "127.0.0.1:4318"   # point OTEL_EXPORTER_OTLP_ENDPOINT here
+health_listen_addr: "127.0.0.1:8126" # /health and /debug
+
+# ── TLS ─────────────────────────────────────────────────
+tls:
+  insecure_skip_verify: false
+  # ca_file: /etc/falconops/ca.pem   # custom CA for on-prem backends
+
+debug: false

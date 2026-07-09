@@ -1,0 +1,130 @@
+version: "3.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# FalconOps AI — On-premise docker-compose
+#
+# On RHEL/CentOS/Rocky/Alma 7 or 8, run ./install-rhel.sh first — it installs
+# Docker, generates backend/.env (random JWT secret, CORS_ORIGINS for your
+# domain), hardens the firewall, and runs the two commands below for you.
+#
+# Manual quick start (from the unpacked bundle root, once backend/.env exists):
+#   docker compose build                                # builds frontend + backend
+#   docker compose up -d                                # starts everything
+#   open http://localhost                               # nginx serves on :80
+#
+# Re-build frontend after changing REACT_APP_BACKEND_URL (it's baked at build):
+#   docker compose build frontend && docker compose up -d
+#
+# Note: mongo/redis/backend/frontend ports are published to 127.0.0.1 only —
+# nginx (80/443) is the sole externally-reachable service.
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  # ======================== FRONTEND ========================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      # REACT_APP_BACKEND_URL is BAKED into the JS at build time. Override here
+      # when you want a different URL than the bundled .env.
+      args:
+        REACT_APP_BACKEND_URL: ${REACT_APP_BACKEND_URL:-http://localhost}
+    # Loopback-only — nginx is the only thing that should be reachable from
+    # the network. Still curl-able from the host itself for debugging.
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
+    networks:
+      - falconops-net
+    restart: unless-stopped
+
+  # ======================== BACKEND ========================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    # Loopback-only — reached externally only via the nginx reverse proxy.
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - ./backend/.env
+    environment:
+      # ── These OVERRIDE backend/.env so the container always talks to the
+      #    sidecar mongo + redis regardless of what's in the file. ──
+      - MONGO_URL=mongodb://mongo:27017
+      - DB_NAME=${DB_NAME:-falconops}
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - falconops-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - falconops-reports:/tmp/falconops_reports
+
+  # ======================== MONGODB ========================
+  mongo:
+    image: mongo:8
+    # Loopback-only — Mongo has no auth configured by default in this compose
+    # file, so it must never be reachable from outside the host.
+    ports:
+      - "127.0.0.1:27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    networks:
+      - falconops-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # ======================== REDIS ========================
+  redis:
+    image: redis:7-alpine
+    # Loopback-only — same reasoning as mongo above (no auth configured).
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - falconops-net
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+
+  # ======================== NGINX GATEWAY ========================
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - falconops-net
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
+  redis-data:
+  falconops-reports:
+
+networks:
+  falconops-net:
+    driver: bridge

@@ -1,0 +1,72 @@
+# FalconOpsAI OneAgent — Kubernetes DaemonSet
+# Deploys one agent per node; auto-discovers pods via /var/log/pods and
+# host processes via hostPID + /proc mount.
+#
+#   kubectl create ns falconops
+#   kubectl -n falconops create secret generic falconops-oneagent \
+#     --from-literal=api-key=YOUR_API_KEY \
+#     --from-literal=backend-url=https://your-falconops-instance.com
+#   kubectl apply -f daemonset.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: falconops-oneagent
+  namespace: falconops
+  labels:
+    app: falconops-oneagent
+spec:
+  selector:
+    matchLabels:
+      app: falconops-oneagent
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: falconops-oneagent
+    spec:
+      hostPID: true          # required for process auto-discovery
+      hostNetwork: true      # OTLP receiver reachable by node-local pods
+      dnsPolicy: ClusterFirstWithHostNet
+      tolerations:
+        - operator: Exists    # run on every node incl. control plane
+      containers:
+        - name: oneagent
+          image: falconops/oneagent:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: FALCONOPS_API_KEY
+              valueFrom:
+                secretKeyRef: { name: falconops-oneagent, key: api-key }
+            - name: FALCONOPS_BACKEND_URL
+              valueFrom:
+                secretKeyRef: { name: falconops-oneagent, key: backend-url }
+            - name: FALCONOPS_HOSTNAME
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: HOST_PROC
+              value: /host/proc
+          securityContext:
+            readOnlyRootFilesystem: false
+            allowPrivilegeEscalation: false
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits:   { cpu: 200m, memory: 128Mi }   # enforces the <100MB budget
+          volumeMounts:
+            - { name: proc,       mountPath: /host/proc, readOnly: true }
+            - { name: varlog,     mountPath: /var/log, readOnly: true }
+            - { name: pods,       mountPath: /var/log/pods, readOnly: true }
+            - { name: containers, mountPath: /var/lib/docker/containers, readOnly: true }
+            - { name: buffer,     mountPath: /var/lib/falconops/buffer }
+          livenessProbe:
+            httpGet: { path: /health, port: 8126, host: 127.0.0.1 }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+      volumes:
+        - { name: proc,       hostPath: { path: /proc } }
+        - { name: varlog,     hostPath: { path: /var/log } }
+        - { name: pods,       hostPath: { path: /var/log/pods } }
+        - { name: containers, hostPath: { path: /var/lib/docker/containers } }
+        - { name: buffer,     hostPath: { path: /var/lib/falconops/buffer, type: DirectoryOrCreate } }

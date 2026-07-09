@@ -1,0 +1,16 @@
+node_modules/
+build/
+.next/
+dist/
+coverage/
+*.log
+.env
+.env.local
+.DS_Store
+.git/
+.gitignore
+.github/
+Dockerfile*
+docker-compose*
+.dockerignore
+*.md
