@@ -43,6 +43,12 @@ async def ingest_event(raw: Dict) -> Dict:
     await db.soc_events.insert_one(event)
     event.pop("_id", None)
 
+    # Best-effort secret-exposure scan — never allowed to affect ingestion itself.
+    try:
+        await _scan_event_for_secrets(event, raw)
+    except Exception as e:
+        logger.debug(f"Secret scan skipped: {e}")
+
     # Check correlation
     incident = await correlate_event(event)
 
@@ -63,6 +69,42 @@ async def ingest_event(raw: Dict) -> Dict:
         "correlated": event["correlated"],
         "incident_id": incident.get("incident_id") if incident else None,
     }
+
+
+async def _scan_event_for_secrets(event: Dict, raw: Dict) -> None:
+    """Scan an ingested event's text for leaked secrets. On a hit, raise a real
+    security_threat (reusing the existing threat/dispatch pipeline in security_service.py
+    / connector_dispatcher.py, not a parallel one) with masked values only."""
+    from .secret_scanner_service import scan_text_for_secrets
+    from . import mitre_mapping_service
+
+    text = f"{event.get('message', '')} {raw.get('raw', '')}".strip()
+    findings = scan_text_for_secrets(text)
+    if not findings:
+        return
+
+    mitre = mitre_mapping_service.classify_mitre_primary("secret exposure leaked credential exposed api key") or {}
+    threat = {
+        "id": str(uuid.uuid4()),
+        "type": "secret_exposure",
+        "severity": "critical",
+        "source_ip": event.get("ip", "unknown"),
+        "user": event.get("user", "unknown"),
+        "host": event.get("host", ""),
+        "message": f"Potential secret exposure in ingested event from '{event.get('source')}': "
+                   f"{', '.join(f['type'] for f in findings[:3])}",
+        "findings": findings[:10],
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "active",
+        "mitre_tactic": mitre.get("mitre_tactic", "Credential Access"),
+        "mitre_technique": mitre.get("mitre_technique", "T1552 - Unsecured Credentials"),
+    }
+    await db.security_threats.insert_one(threat)
+    try:
+        from .connector_dispatcher import dispatch_threat
+        await dispatch_threat(threat)
+    except Exception as e:
+        logger.warning(f"Secret-exposure threat dispatch skipped: {e}")
 
 
 async def ingest_batch(events: List[Dict]) -> Dict:
@@ -218,7 +260,12 @@ DEFAULT_INGESTION_CONFIG = {
     "auto_ai_trigger": True,
     "correlation_window_min": 10,
     "incident_threshold": 3,
-    "accepted_sources": ["api", "aws_cloudtrail", "aws_vpc", "syslog", "webhook", "agent"],
+    # Any source name is accepted at ingest_event()/normalize_event() today (unknown
+    # fields already fall through into `metadata`) — this list is descriptive/UI-facing,
+    # not an enforced allowlist. Includes the generic pull-source mechanism below so a
+    # future Splunk/Elastic/Datadog connector can plug in via poll_generic_source()
+    # without inventing a parallel ingestion path.
+    "accepted_sources": ["api", "aws_cloudtrail", "aws_vpc", "syslog", "webhook", "agent", "generic_pull"],
 }
 
 
@@ -232,3 +279,119 @@ async def update_ingestion_config(updates: Dict) -> Dict:
     cfg.update({k: v for k, v in updates.items() if k in DEFAULT_INGESTION_CONFIG})
     await db.soc_ingestion_config.update_one({"key": "config"}, {"$set": {"value": cfg}}, upsert=True)
     return cfg
+
+
+# ======================== GENERIC PULL-SOURCE FRAMEWORK ========================
+# The real, generic mechanism a future vendor connector (Splunk/Elastic/Datadog/etc.)
+# would plug into by supplying its own url/auth_header/field_mapping — no vendor-specific
+# code is written here. Feeds straight into ingest_batch(), not a parallel pipeline.
+
+async def register_ingestion_source(config: Dict) -> Dict:
+    """Register a generic HTTP pull source. config: {name, url, method, auth_header,
+    poll_interval_seconds, field_mapping, enabled}. field_mapping maps this source's
+    response field names onto normalize_event()'s expected keys (service/severity/
+    message/host/ip/user/action/category)."""
+    doc = {
+        "id": str(uuid.uuid4()),
+        "name": config.get("name", "unnamed source"),
+        "url": config["url"],
+        "method": config.get("method", "GET").upper(),
+        "auth_header": config.get("auth_header"),
+        "poll_interval_seconds": max(30, int(config.get("poll_interval_seconds", 300))),
+        "field_mapping": config.get("field_mapping", {}),
+        "enabled": config.get("enabled", True),
+        "last_polled_at": None,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.ingestion_sources.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+async def list_ingestion_sources() -> List[Dict]:
+    return await db.ingestion_sources.find({}, {"_id": 0}).to_list(100)
+
+
+async def delete_ingestion_source(source_id: str) -> bool:
+    result = await db.ingestion_sources.delete_one({"id": source_id})
+    return result.deleted_count > 0
+
+
+def _map_response_items(items: List[Dict], field_mapping: Dict, source_name: str) -> List[Dict]:
+    mapped = []
+    for item in items:
+        raw = {"source": f"generic_pull:{source_name}"}
+        for target_field, source_field in field_mapping.items():
+            if source_field in item:
+                raw[target_field] = item[source_field]
+        if not field_mapping:
+            raw.update(item)  # no mapping configured — pass through, normalize_event() still applies safe defaults
+        mapped.append(raw)
+    return mapped
+
+
+async def poll_generic_source(source_config: Dict) -> Dict:
+    """Poll one registered generic source over real HTTP and feed results through the
+    existing ingest_batch() pipeline. Network/parse failures are logged and return a
+    zero-ingested result — never raised into the scheduler loop."""
+    import httpx
+
+    url = source_config["url"]
+    method = source_config.get("method", "GET").upper()
+    headers = {}
+    if source_config.get("auth_header"):
+        headers["Authorization"] = source_config["auth_header"]
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.request(method, url, headers=headers)
+            if resp.status_code != 200:
+                logger.warning(f"Generic source '{source_config.get('name')}' returned status {resp.status_code}")
+                return {"ingested": 0, "incidents_created": 0, "results": []}
+            payload = resp.json()
+    except Exception as e:
+        logger.warning(f"Generic source '{source_config.get('name')}' poll failed: {e}")
+        return {"ingested": 0, "incidents_created": 0, "results": []}
+
+    items = payload if isinstance(payload, list) else payload.get("items", payload.get("results", []))
+    if not isinstance(items, list):
+        items = []
+    raw_events = _map_response_items(items, source_config.get("field_mapping", {}), source_config.get("name", "generic"))
+    if not raw_events:
+        return {"ingested": 0, "incidents_created": 0, "results": []}
+    return await ingest_batch(raw_events)
+
+
+GENERIC_INGESTION_TICK_SECONDS = 60
+
+
+async def generic_ingestion_scheduler():
+    """Background loop: each tick, polls any registered generic source whose
+    poll_interval has elapsed. Mirrors the shape of the other schedulers in this codebase
+    (e.g. autonomous_ops_orchestrator.sla_breach_scheduler)."""
+    while True:
+        try:
+            sources = await list_ingestion_sources()
+            now = datetime.now(timezone.utc)
+            for source in sources:
+                if not source.get("enabled", True):
+                    continue
+                last_polled = source.get("last_polled_at")
+                due = True
+                if last_polled:
+                    try:
+                        last_dt = datetime.fromisoformat(last_polled.replace("Z", "+00:00"))
+                        due = (now - last_dt).total_seconds() >= source["poll_interval_seconds"]
+                    except Exception:
+                        due = True
+                if not due:
+                    continue
+                result = await poll_generic_source(source)
+                await db.ingestion_sources.update_one(
+                    {"id": source["id"]}, {"$set": {"last_polled_at": now.isoformat()}}
+                )
+                if result.get("ingested"):
+                    logger.info(f"Generic source '{source.get('name')}': ingested {result['ingested']} event(s)")
+        except Exception as e:
+            logger.error(f"Generic ingestion scheduler error: {e}")
+        await asyncio.sleep(GENERIC_INGESTION_TICK_SECONDS)

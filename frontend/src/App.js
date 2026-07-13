@@ -43,6 +43,7 @@ import { HealthRulesPage } from './pages/HealthRulesPage';
 import SyntheticMonitoringPage from './pages/SyntheticMonitoringPage';
 import SelfMonitoringPage from './pages/SelfMonitoringPage';
 import SecurityMonitoringPage from './pages/SecurityMonitoringPage';
+import ExecutiveSecurityDashboardPage from './pages/ExecutiveSecurityDashboardPage';
 import UEBAPage from './pages/UEBAPage';
 import AttackSimulatorPage from './pages/AttackSimulatorPage';
 import IntegrationsPage from './pages/IntegrationsPage';
@@ -441,16 +442,24 @@ const AppRoutes = () => {
                     </ProtectedRoute>
                 } 
             />
-            <Route 
-                path="/security-monitoring" 
+            <Route
+                path="/security-monitoring"
                 element={
                     <ProtectedRoute>
                         <SecurityMonitoringPage />
                     </ProtectedRoute>
-                } 
+                }
             />
-            <Route 
-                path="/ueba" 
+            <Route
+                path="/executive-security"
+                element={
+                    <ProtectedRoute>
+                        <ExecutiveSecurityDashboardPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ueba"
                 element={
                     <ProtectedRoute>
                         <UEBAPage />

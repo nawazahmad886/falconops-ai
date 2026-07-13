@@ -9,6 +9,7 @@ from ..utils.auth import require_auth, require_admin
 from ..services.soc_ingestion_service import (
     ingest_event, ingest_batch, get_recent_events,
     get_incidents, get_ingestion_stats, get_ingestion_config, update_ingestion_config,
+    register_ingestion_source, list_ingestion_sources, delete_ingestion_source, poll_generic_source,
 )
 from ..services.ai_agents_service import (
     AGENTS, get_llm, get_agent_stats, get_pipeline_config,
@@ -90,6 +91,45 @@ async def config(current_user: dict = Depends(require_auth)):
 async def update_config(req: IngestionConfigRequest, current_user: dict = Depends(require_admin)):
     updates = {k: v for k, v in req.dict().items() if v is not None}
     return await update_ingestion_config(updates)
+
+
+# ======================== GENERIC INGESTION SOURCES ========================
+# Real, generic HTTP pull-source registration — no vendor-specific (Splunk/Elastic/etc.)
+# connector code; a future one would plug in here by supplying its own url/field_mapping.
+
+class IngestionSourceRequest(BaseModel):
+    name: str
+    url: str
+    method: Optional[str] = "GET"
+    auth_header: Optional[str] = None
+    poll_interval_seconds: Optional[int] = 300
+    field_mapping: Optional[dict] = {}
+    enabled: Optional[bool] = True
+
+
+@router.get("/ingestion-sources")
+async def get_ingestion_sources(current_user: dict = Depends(require_auth)):
+    return {"sources": await list_ingestion_sources()}
+
+
+@router.post("/ingestion-sources")
+async def create_ingestion_source(req: IngestionSourceRequest, current_user: dict = Depends(require_admin)):
+    return await register_ingestion_source(req.dict())
+
+
+@router.delete("/ingestion-sources/{source_id}")
+async def remove_ingestion_source(source_id: str, current_user: dict = Depends(require_admin)):
+    deleted = await delete_ingestion_source(source_id)
+    return {"deleted": deleted}
+
+
+@router.post("/ingestion-sources/{source_id}/poll-now")
+async def poll_ingestion_source_now(source_id: str, current_user: dict = Depends(require_admin)):
+    sources = await list_ingestion_sources()
+    source = next((s for s in sources if s["id"] == source_id), None)
+    if not source:
+        return {"error": "source not found"}
+    return await poll_generic_source(source)
 
 
 # ======================== ADMIN AGENT CONFIGURATION ========================

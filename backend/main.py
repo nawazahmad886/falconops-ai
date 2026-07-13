@@ -39,6 +39,13 @@ from app.services import kafka_consumers
 # Import autonomous ops orchestrator (SLA-breach escalation scheduler)
 from app.services import autonomous_ops_orchestrator
 
+# Import AI-SOC background schedulers (threat intel, vulnerability sync, compliance
+# snapshots, generic ingestion polling)
+from app.services import threat_intel_service
+from app.services import vulnerability_service
+from app.services import compliance_service
+from app.services import soc_ingestion_service
+
 # Background task for metrics processor
 metrics_processor_task = None
 
@@ -48,11 +55,18 @@ kafka_consumer_task = None
 # Background task for the SLA-breach escalation scheduler
 sla_breach_task = None
 
+# Background tasks for the AI-SOC schedulers
+threat_intel_task = None
+vuln_sync_task = None
+compliance_snapshot_task = None
+generic_ingestion_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     global metrics_processor_task, kafka_consumer_task, sla_breach_task
+    global threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -117,6 +131,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"SLA-breach scheduler init warning: {e}")
 
+    # AI-SOC schedulers: threat intel IOC feed refresh, CVE sync, compliance snapshots,
+    # and generic pull-source ingestion polling. Each degrades honestly (network failures
+    # are logged, not fatal) and follows the same while/sleep pattern as sla_breach_scheduler.
+    try:
+        threat_intel_task = asyncio.create_task(threat_intel_service.threat_intel_refresh_scheduler())
+        vuln_sync_task = asyncio.create_task(vulnerability_service.vulnerability_sync_scheduler())
+        compliance_snapshot_task = asyncio.create_task(compliance_service.compliance_snapshot_scheduler())
+        generic_ingestion_task = asyncio.create_task(soc_ingestion_service.generic_ingestion_scheduler())
+        logger.info("AI-SOC schedulers started (threat intel, vulnerability sync, compliance snapshots, generic ingestion)")
+    except Exception as e:
+        logger.warning(f"AI-SOC scheduler init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
     
     # Start uptime monitor scheduler
@@ -162,6 +188,15 @@ async def lifespan(app: FastAPI):
             await sla_breach_task
         except asyncio.CancelledError:
             pass
+
+    # Stop AI-SOC schedulers
+    for task in (threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task):
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
     stop_monitoring_scheduler()
     stop_uptime_scheduler()

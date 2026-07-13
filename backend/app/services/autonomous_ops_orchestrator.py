@@ -26,6 +26,7 @@ from . import ai_agents_service
 from . import remediation_service
 from . import k8s_healing_service
 from . import connector_dispatcher
+from . import security_agents_service
 from .incident_engine import incident_engine
 from .alert_engine import alert_engine
 
@@ -63,6 +64,20 @@ def _classify_root_cause_key(text: str) -> Optional[str]:
         if any(kw in lower for kw in keywords):
             return key
     return None
+
+
+# Bridges a classified root cause to the specialized security agent(s) (section 5 of the
+# AI-SOC plan) worth invoking for extra narrative — only for the security-flavored root
+# causes already in _ROOT_CAUSE_KEYWORDS above, extending this loop rather than forking it.
+_SECURITY_ROOT_CAUSE_AGENT_MAP: Dict[str, List[str]] = {
+    "brute_force": ["identity"],
+    "credential_compromise": ["identity"],
+    "privilege_escalation": ["identity", "compliance"],
+    "data_exfiltration": ["threat_hunting"],
+    "port_scan": ["network"],
+    "impossible_travel": ["identity"],
+    "malicious_ip": ["threat_hunting", "network"],
+}
 
 
 def _fingerprint_incident(incident: Dict[str, Any]) -> str:
@@ -136,6 +151,25 @@ async def investigate_and_recommend(
                 "pod_name": service, "app_label": service,
             })
 
+        agent_narratives = {
+            r.get("agent_id"): r.get("analysis")
+            for r in crew.get("results", []) if isinstance(r, dict) and r.get("agent_id")
+        }
+
+        # 6. If this incident's root cause is security-flavored, also invoke the relevant
+        # specialized security agent(s) and merge their narrative in — extends this same
+        # recommendation-only loop, never a second parallel one.
+        security_agent_ids = _SECURITY_ROOT_CAUSE_AGENT_MAP.get(root_cause_key or "", [])
+        for agent_id in security_agent_ids:
+            try:
+                sec_result = await security_agents_service.run_security_agent(
+                    agent_id, query, tenant_id=tenant_id
+                )
+                if sec_result:
+                    agent_narratives[f"security_{agent_id}"] = sec_result.get("summary")
+            except Exception as e:
+                logger.warning(f"Security agent '{agent_id}' failed for incident {incident_id}: {e}")
+
         recommendation = {
             "id": str(uuid.uuid4()),
             "incident_id": incident_id,
@@ -146,10 +180,7 @@ async def investigate_and_recommend(
             "confidence": rca.get("confidence", 0.5),
             "evidence": rca.get("evidence", []),
             "evidence_refs": rca.get("evidence_refs", []),
-            "agent_narratives": {
-                r.get("agent_id"): r.get("analysis")
-                for r in crew.get("results", []) if isinstance(r, dict) and r.get("agent_id")
-            },
+            "agent_narratives": agent_narratives,
             "suggested_actions": suggested_actions,
             "k8s_suggestion": k8s_suggestion,
             "context_topology": context.get("topology"),

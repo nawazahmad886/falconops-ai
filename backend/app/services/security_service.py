@@ -9,6 +9,9 @@ from collections import defaultdict
 from typing import List, Dict, Any, Optional
 
 from ..core.database import db
+from . import mitre_mapping_service
+from . import threat_intel_service
+from .anomaly_detection_engine import anomaly_detection_engine as _anomaly_engine
 
 logger = logging.getLogger(__name__)
 
@@ -16,9 +19,12 @@ logger = logging.getLogger(__name__)
 
 _failed_logins = defaultdict(list)  # ip -> [timestamps]
 _user_locations = defaultdict(list)  # user -> [(ip, timestamp)]
+_user_hosts = defaultdict(list)  # user -> [(host, timestamp)] — lateral-movement tracker
+_api_call_counts = defaultdict(list)  # user_or_ip -> [timestamps] — per-minute API call tracker
 BRUTE_FORCE_THRESHOLD = 5
 BRUTE_FORCE_WINDOW_MINUTES = 10
-KNOWN_MALICIOUS_IPS = set()  # Populated from DB on startup
+LATERAL_MOVEMENT_HOST_THRESHOLD = 3
+LATERAL_MOVEMENT_WINDOW_MINUTES = 15
 
 
 # ======================== THREAT DETECTION ENGINE ========================
@@ -50,6 +56,16 @@ class ThreatDetectionEngine:
         if event.get("action") in ("data_export", "bulk_download", "mass_delete"):
             threats.append(await self._flag_data_exfiltration(event))
 
+        if event.get("action") == "login_success":
+            t = await self._check_lateral_movement(event)
+            if t:
+                threats.append(t)
+
+        if event.get("category") == "application" or event.get("action") == "api_access":
+            t = await self._check_api_abuse(event)
+            if t:
+                threats.append(t)
+
         # Store any generated threats
         for threat in threats:
             if threat:
@@ -66,6 +82,7 @@ class ThreatDetectionEngine:
         _failed_logins[ip].append(now)
 
         if len(_failed_logins[ip]) >= BRUTE_FORCE_THRESHOLD:
+            mitre = mitre_mapping_service.classify_mitre_primary("brute force repeated login failed logins") or {}
             return {
                 "id": str(uuid.uuid4()),
                 "type": "brute_force",
@@ -76,24 +93,119 @@ class ThreatDetectionEngine:
                 "attempt_count": len(_failed_logins[ip]),
                 "timestamp": now.isoformat(),
                 "status": "active",
-                "mitre_tactic": "Credential Access",
-                "mitre_technique": "T1110 - Brute Force",
+                "mitre_tactic": mitre.get("mitre_tactic", "Credential Access"),
+                "mitre_technique": mitre.get("mitre_technique", "T1110 - Brute Force"),
             }
         return None
 
     async def _check_malicious_ip(self, event: Dict) -> Optional[Dict]:
         ip = event.get("source_ip", "")
-        if ip in KNOWN_MALICIOUS_IPS:
+        if not ip or ip == "unknown":
+            return None
+        match = await threat_intel_service.is_malicious_ip(ip)
+        if match:
+            mitre = mitre_mapping_service.classify_mitre_primary("malicious ip known bad ip blocklisted ip") or {}
             return {
                 "id": str(uuid.uuid4()),
                 "type": "malicious_ip",
                 "severity": "critical",
                 "source_ip": ip,
-                "message": f"Connection from known malicious IP: {ip}",
+                "message": f"Connection from known malicious IP: {ip} (source: {match.get('source')}, "
+                           f"{match.get('malware_family') or 'threat intel match'})",
+                "ioc_source": match.get("source"),
+                "malware_family": match.get("malware_family"),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "status": "active",
-                "mitre_tactic": "Initial Access",
-                "mitre_technique": "T1190 - Exploit Public-Facing Application",
+                "mitre_tactic": mitre.get("mitre_tactic", "Initial Access"),
+                "mitre_technique": mitre.get("mitre_technique", "T1190 - Exploit Public-Facing Application"),
+            }
+        return None
+
+    async def _check_lateral_movement(self, event: Dict) -> Optional[Dict]:
+        """Flag a user authenticating to many distinct hosts in a short window —
+        a real signal of lateral movement, not just noisy legitimate access patterns."""
+        user = event.get("user", "unknown")
+        host = event.get("host", "")
+        if not host or user == "unknown":
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=LATERAL_MOVEMENT_WINDOW_MINUTES)
+
+        _user_hosts[user] = [(h, t) for h, t in _user_hosts[user] if t > cutoff]
+        _user_hosts[user].append((host, now))
+
+        distinct_hosts = {h for h, _ in _user_hosts[user]}
+        if len(distinct_hosts) >= LATERAL_MOVEMENT_HOST_THRESHOLD:
+            mitre = mitre_mapping_service.classify_mitre_primary("lateral movement remote service multiple hosts") or {}
+            return {
+                "id": str(uuid.uuid4()),
+                "type": "lateral_movement",
+                "severity": "high",
+                "user": user,
+                "source_ip": event.get("source_ip", "unknown"),
+                "message": f"Possible lateral movement: {user} authenticated to {len(distinct_hosts)} distinct hosts "
+                           f"in {LATERAL_MOVEMENT_WINDOW_MINUTES}min ({', '.join(sorted(distinct_hosts)[:5])})",
+                "hosts": sorted(distinct_hosts),
+                "timestamp": now.isoformat(),
+                "status": "active",
+                "mitre_tactic": mitre.get("mitre_tactic", "Lateral Movement"),
+                "mitre_technique": mitre.get("mitre_technique", "T1021 - Remote Services"),
+            }
+        return None
+
+    async def _check_api_abuse(self, event: Dict) -> Optional[Dict]:
+        """Reuses the real IsolationForest+ensemble anomaly_detection_engine on a
+        per-minute API-call-count series, rather than a bespoke threshold — a genuine
+        ML-based detector, not a second hardcoded rule."""
+        key = event.get("user") if event.get("user") and event.get("user") != "unknown" else event.get("source_ip", "unknown")
+        if not key or key == "unknown":
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(hours=6)
+        _api_call_counts[key] = [t for t in _api_call_counts[key] if t > cutoff]
+        _api_call_counts[key].append(now)
+
+        # Write the rolling per-minute REQUEST COUNT (not a constant 1 per event) — the
+        # anomaly engine detects spikes in this value over time, so it must actually vary
+        # with call volume, or a burst would look identical to steady-state traffic.
+        rolling_count = sum(1 for t in _api_call_counts[key] if t > now - timedelta(minutes=1))
+        try:
+            await db.metrics_timeseries.insert_one({
+                "name": "api_requests_per_min",
+                "value": rolling_count,
+                "unit": "count",
+                "tags": {"host": key},
+                "timestamp": now.isoformat(),
+            })
+        except Exception as e:
+            logger.debug(f"api_requests_per_min metric write skipped: {e}")
+
+        # Only worth running the detector once we have a minimally meaningful baseline.
+        if len(_api_call_counts[key]) < 10:
+            return None
+
+        try:
+            result = await _anomaly_engine.analyze_metric("api_requests_per_min", host=key, lookback_hours=6)
+        except Exception as e:
+            logger.debug(f"api abuse anomaly check skipped: {e}")
+            return None
+
+        anomaly = result.get("anomaly") or {}
+        if result.get("status") == "success" and anomaly.get("is_anomaly"):
+            mitre = mitre_mapping_service.classify_mitre_primary("api abuse abnormal api rate anomaly") or {}
+            return {
+                "id": str(uuid.uuid4()),
+                "type": "api_abuse",
+                "severity": "high" if anomaly.get("severity") in ("high", "critical") else "medium",
+                "user": event.get("user", "unknown"),
+                "source_ip": event.get("source_ip", "unknown"),
+                "message": f"Abnormal API request rate detected for {key}: ensemble anomaly score "
+                           f"{anomaly.get('ensemble_score')} ({anomaly.get('detector_votes')}/{anomaly.get('total_detectors')} detectors agree)",
+                "ensemble_score": anomaly.get("ensemble_score"),
+                "timestamp": now.isoformat(),
+                "status": "active",
+                "mitre_tactic": mitre.get("mitre_tactic", "Execution"),
+                "mitre_technique": mitre.get("mitre_technique", "T1106 - Native API"),
             }
         return None
 
@@ -114,6 +226,7 @@ class ThreatDetectionEngine:
             if prev["geo"] and curr["geo"] and prev["geo"] != curr["geo"]:
                 delta = (curr["ts"] - prev["ts"]).total_seconds()
                 if delta < 3600:  # < 1 hour between different geos
+                    mitre = mitre_mapping_service.classify_mitre_primary("impossible travel valid account") or {}
                     return {
                         "id": str(uuid.uuid4()),
                         "type": "impossible_travel",
@@ -126,12 +239,13 @@ class ThreatDetectionEngine:
                         "time_delta_seconds": delta,
                         "timestamp": now.isoformat(),
                         "status": "active",
-                        "mitre_tactic": "Initial Access",
-                        "mitre_technique": "T1078 - Valid Accounts",
+                        "mitre_tactic": mitre.get("mitre_tactic", "Initial Access"),
+                        "mitre_technique": mitre.get("mitre_technique", "T1078 - Valid Accounts"),
                     }
         return None
 
     async def _flag_privilege_escalation(self, event: Dict) -> Dict:
+        mitre = mitre_mapping_service.classify_mitre_primary("privilege escalation sudo command role change") or {}
         return {
             "id": str(uuid.uuid4()),
             "type": "privilege_escalation",
@@ -141,11 +255,12 @@ class ThreatDetectionEngine:
             "message": f"Privilege escalation detected: {event.get('user', 'unknown')} performed {event.get('action', '')}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "active",
-            "mitre_tactic": "Privilege Escalation",
-            "mitre_technique": "T1548 - Abuse Elevation Control",
+            "mitre_tactic": mitre.get("mitre_tactic", "Privilege Escalation"),
+            "mitre_technique": mitre.get("mitre_technique", "T1548 - Abuse Elevation Control"),
         }
 
     async def _flag_data_exfiltration(self, event: Dict) -> Dict:
+        mitre = mitre_mapping_service.classify_mitre_primary("exfiltration data export bulk download") or {}
         return {
             "id": str(uuid.uuid4()),
             "type": "data_exfiltration",
@@ -155,8 +270,8 @@ class ThreatDetectionEngine:
             "message": f"Potential data exfiltration: {event.get('user', 'unknown')} initiated {event.get('action', '')}",
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "status": "active",
-            "mitre_tactic": "Exfiltration",
-            "mitre_technique": "T1041 - Exfiltration Over C2 Channel",
+            "mitre_tactic": mitre.get("mitre_tactic", "Exfiltration"),
+            "mitre_technique": mitre.get("mitre_technique", "T1041 - Exfiltration Over C2 Channel"),
         }
 
     async def _store_threat(self, threat: Dict):

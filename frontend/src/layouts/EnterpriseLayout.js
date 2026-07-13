@@ -202,6 +202,7 @@ const MODULES = {
         color: 'text-red-400',
         description: 'Threat Detection & Response',
         sidebar: [
+            { path: '/executive-security', label: 'Executive Dashboard', icon: Shield },
             { path: '/security-monitoring', label: 'Security Overview', icon: Shield },
             { path: '/soc-live-feed', label: 'SOC Live Feed', icon: Radio },
             { path: '/security-monitoring?tab=threats', label: 'Threat Detection', icon: Target },
@@ -611,7 +612,7 @@ export const EnterpriseLayout = ({ children }) => {
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';
         if (path.startsWith('/ai-observability') || path.startsWith('/ask-falconops')) return 'ai_observability';
         if (['/core-aiops', '/aiops-brain', '/event-analyzer', '/capacity-prediction', '/intelligence', '/remediation', '/impact-analysis', '/ai-agents', '/alert-correlation', '/k8s-healing', '/ai-monitoring'].some(p => path.startsWith(p))) return 'aiops';
-        if (['/security-monitoring', '/ueba', '/attack-simulator', '/soc-live-feed', '/aws-connectors', '/detection-rules'].some(p => path.startsWith(p))) return 'security';
+        if (['/executive-security', '/security-monitoring', '/ueba', '/attack-simulator', '/soc-live-feed', '/aws-connectors', '/detection-rules'].some(p => path.startsWith(p))) return 'security';
         if (['/runbooks'].some(p => path.startsWith(p))) return 'automation';
         if (['/analytics', '/reports', '/weekly-reports', '/scheduled-reports', '/tenant-schedules', '/report-builder'].some(p => path.startsWith(p))) return 'insights';
         if (['/admin', '/download', '/settings', '/integrations', '/rbac', '/kafka-pipeline', '/tenants', '/billing', '/admin-console', '/tenant-branding', '/admin/control-console', '/admin/plans', '/admin/email-templates', '/admin/leads', '/admin/automation-templates', '/admin/aws-deploy'].some(p => path.startsWith(p))) return 'enterprise';

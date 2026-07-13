@@ -178,6 +178,30 @@ async def get_user_behavior_timeline(user: str, hours: int = 168) -> Dict:
     }
 
 
+async def get_insider_threat_candidates(hours: int = 168) -> List[Dict]:
+    """Explicit insider-threat framing on top of the already-real UEBA risk score:
+    a user is a candidate when their behavioral risk is high/critical AND they've
+    actually touched privileged or data-sensitive actions — pure re-labeling of
+    build_user_profiles() output, no new data source, no fabricated signal."""
+    profiles = await build_user_profiles(hours)
+    candidates = []
+    for p in profiles:
+        if p["risk_level"] not in ("high", "critical"):
+            continue
+        if p["priv_actions"] <= 0 and p["data_actions"] <= 0:
+            continue
+        reasons = []
+        if p["priv_actions"] > 0:
+            reasons.append(f"{p['priv_actions']} privileged action(s)")
+        if p["data_actions"] > 0:
+            reasons.append(f"{p['data_actions']} data-access event(s)")
+        candidates.append({
+            **p,
+            "insider_threat_reason": f"Risk level {p['risk_level']} with {' and '.join(reasons)}",
+        })
+    return candidates
+
+
 async def get_ueba_summary(hours: int = 168) -> Dict:
     """Get UEBA summary statistics"""
     profiles = await build_user_profiles(hours)

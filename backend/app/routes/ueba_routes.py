@@ -10,6 +10,7 @@ from ..services.ueba_service import (
     build_user_profiles,
     get_user_behavior_timeline,
     get_ueba_summary,
+    get_insider_threat_candidates,
 )
 
 router = APIRouter(prefix="/api/security/ueba", tags=["UEBA"])
@@ -31,6 +32,16 @@ async def ueba_summary(
 ):
     """Get UEBA summary statistics"""
     return await get_ueba_summary(hours)
+
+
+@router.get("/insider-threats")
+async def insider_threats(
+    hours: int = Query(168, description="Lookback window in hours"),
+    current_user: Optional[dict] = Depends(get_current_user),
+):
+    """Get insider-threat candidates: users with high/critical UEBA risk who also
+    touched privileged or data-sensitive actions."""
+    return await get_insider_threat_candidates(hours)
 
 
 @router.get("/user/{username}")

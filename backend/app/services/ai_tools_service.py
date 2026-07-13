@@ -204,6 +204,86 @@ async def get_agent_status(service: Optional[str] = None, host: Optional[str] = 
             "count": len(data), "data": data, "any_healthy": any_healthy, "summary": summary}
 
 
+async def get_threats(status: Optional[str] = "active", severity: Optional[str] = None,
+                      limit: int = 50) -> Dict[str, Any]:
+    """Query detected security threats (db.security_threats)."""
+    from .security_service import get_threats as _get_threats
+    rows = await _get_threats(status=status, severity=severity, limit=limit)
+    return {"tool": "get_threats", "params": {"status": status, "severity": severity, "limit": limit},
+            "count": len(rows), "data": rows,
+            "summary": f"{len(rows)} threat(s)" + (f" with status '{status}'" if status else "")}
+
+
+async def get_security_events(hours: int = 24, category: Optional[str] = None,
+                              severity: Optional[str] = None, search: Optional[str] = None,
+                              limit: int = 100) -> Dict[str, Any]:
+    """Query raw security events (db.security_events)."""
+    from .security_service import get_security_events as _get_security_events
+    result = await _get_security_events(hours=hours, category=category, severity=severity,
+                                        search=search, limit=limit)
+    rows = result.get("events", [])
+    return {"tool": "get_security_events", "params": {"hours": hours, "category": category, "severity": severity},
+            "count": result.get("total", len(rows)), "data": rows,
+            "summary": f"{result.get('total', len(rows))} security event(s) in last {hours}h"}
+
+
+async def get_ueba_profiles(hours: int = 168, insider_only: bool = False) -> Dict[str, Any]:
+    """Query UEBA behavioral risk profiles, optionally filtered to insider-threat candidates."""
+    from .ueba_service import build_user_profiles, get_insider_threat_candidates
+    rows = await (get_insider_threat_candidates(hours) if insider_only else build_user_profiles(hours))
+    return {"tool": "get_ueba_profiles", "params": {"hours": hours, "insider_only": insider_only},
+            "count": len(rows), "data": rows[:30],
+            "summary": f"{len(rows)} user profile(s)" + (" (insider-threat candidates only)" if insider_only else "")}
+
+
+async def get_vulnerabilities(limit: int = 20) -> Dict[str, Any]:
+    """Query prioritized vulnerabilities (CVSS + real topology-derived asset criticality)."""
+    from .vulnerability_service import get_vulnerability_dashboard
+    dash = await get_vulnerability_dashboard()
+    rows = dash.get("top_priority", [])[:limit]
+    return {"tool": "get_vulnerabilities", "params": {"limit": limit},
+            "count": dash.get("total_vulnerabilities", len(rows)), "data": rows,
+            "summary": f"{dash.get('total_vulnerabilities', 0)} known vulnerabilit(y/ies), "
+                       f"top priority shown"}
+
+
+async def get_mitre_matrix(hours: int = 24) -> Dict[str, Any]:
+    """Query the MITRE ATT&CK matrix: technique counts grouped by tactic over the window."""
+    from .mitre_mapping_service import get_mitre_matrix as _get_mitre_matrix
+    matrix = await _get_mitre_matrix(hours=hours)
+    return {"tool": "get_mitre_matrix", "params": {"hours": hours},
+            "count": matrix.get("total_tagged_events", 0), "data": matrix.get("tactics", []),
+            "summary": f"{matrix.get('total_tagged_events', 0)} MITRE-tagged event(s) in last {hours}h"}
+
+
+async def get_compliance_status(framework: Optional[str] = None) -> Dict[str, Any]:
+    """Query compliance control status (SOC2/ISO27001) — controls without a real backing
+    signal report status 'unknown', never a fabricated pass."""
+    from .compliance_service import get_compliance_dashboard, evaluate_compliance
+    if framework:
+        result = await evaluate_compliance(framework)
+        rows = result.get("controls", [])
+        return {"tool": "get_compliance_status", "params": {"framework": framework},
+                "count": len(rows), "data": rows,
+                "summary": f"{framework}: {result.get('compliance_score')}% controls passing"}
+    dash = await get_compliance_dashboard()
+    return {"tool": "get_compliance_status", "params": {"framework": None},
+            "count": len(dash.get("frameworks", [])), "data": dash.get("frameworks", []),
+            "summary": "Compliance overview across all frameworks"}
+
+
+async def get_topology_summary() -> Dict[str, Any]:
+    """Query the service topology (nodes/edges) and overall system risk score."""
+    from .topology_service import topology_service
+    from .impact_analysis_engine import impact_analysis_engine
+    topo = await topology_service.get_topology()
+    risk = await impact_analysis_engine.get_system_risk_summary()
+    return {"tool": "get_topology_summary", "params": {},
+            "count": topo.get("node_count", 0), "data": {"topology": topo, "system_risk": risk},
+            "summary": f"{topo.get('node_count', 0)} service(s) in topology, "
+                       f"system risk {risk.get('risk_level')} ({risk.get('risk_score')})"}
+
+
 async def list_services() -> List[str]:
     """Known services across logs + traces."""
     try:
@@ -235,6 +315,20 @@ TOOL_DEFS: List[Dict[str, Any]] = [
     {"name": "get_agent_status", "description": "Check OneAgent (telemetry collector) health for a service/host — use this to tell "
      "apart 'service is healthy' from 'no data because the collector is stale/offline'.",
      "params": {"service": "string?", "host": "string?"}},
+    {"name": "get_threats", "description": "Query detected security threats (brute force, malicious IP, lateral movement, etc.).",
+     "params": {"status": "string? (default active)", "severity": "string?", "limit": "int (default 50)"}},
+    {"name": "get_security_events", "description": "Query raw security events (logins, privileged actions, data access) with filters.",
+     "params": {"hours": "int (default 24)", "category": "string?", "severity": "string?", "search": "string?", "limit": "int (default 100)"}},
+    {"name": "get_ueba_profiles", "description": "Query UEBA behavioral risk profiles per user, optionally filtered to insider-threat candidates.",
+     "params": {"hours": "int (default 168)", "insider_only": "bool (default false)"}},
+    {"name": "get_vulnerabilities", "description": "Query prioritized vulnerabilities (CVSS + real topology-derived asset criticality).",
+     "params": {"limit": "int (default 20)"}},
+    {"name": "get_mitre_matrix", "description": "Query the MITRE ATT&CK matrix: technique counts grouped by tactic.",
+     "params": {"hours": "int (default 24)"}},
+    {"name": "get_compliance_status", "description": "Query compliance control status (SOC2/ISO27001); one framework or an overview.",
+     "params": {"framework": "string?"}},
+    {"name": "get_topology_summary", "description": "Query the service topology (nodes/edges) and overall system risk score.",
+     "params": {}},
 ]
 
 _TOOL_FUNCS = {
@@ -244,6 +338,13 @@ _TOOL_FUNCS = {
     "get_deployments": get_deployments,
     "get_incidents": get_incidents,
     "get_agent_status": get_agent_status,
+    "get_threats": get_threats,
+    "get_security_events": get_security_events,
+    "get_ueba_profiles": get_ueba_profiles,
+    "get_vulnerabilities": get_vulnerabilities,
+    "get_mitre_matrix": get_mitre_matrix,
+    "get_compliance_status": get_compliance_status,
+    "get_topology_summary": get_topology_summary,
 }
 
 _ALLOWED_PARAMS = {
@@ -253,6 +354,13 @@ _ALLOWED_PARAMS = {
     "get_deployments": {"service", "minutes"},
     "get_incidents": {"service", "status", "limit"},
     "get_agent_status": {"service", "host"},
+    "get_threats": {"status", "severity", "limit"},
+    "get_security_events": {"hours", "category", "severity", "search", "limit"},
+    "get_ueba_profiles": {"hours", "insider_only"},
+    "get_vulnerabilities": {"limit"},
+    "get_mitre_matrix": {"hours"},
+    "get_compliance_status": {"framework"},
+    "get_topology_summary": set(),
 }
 
 

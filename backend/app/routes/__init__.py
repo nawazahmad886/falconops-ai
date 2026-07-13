@@ -70,6 +70,11 @@ from .ai_monitoring_routes import router as ai_monitoring_router
 from .log_analyzer_routes import router as log_analyzer_router
 from .ai_intelligence_routes import router as ai_intelligence_router
 from .oneagent_routes import ingest_router as oneagent_ingest_router, mgmt_router as oneagent_mgmt_router
+from .mitre_routes import router as mitre_router
+from .vulnerability_routes import router as vulnerability_router
+from .compliance_routes import router as compliance_router
+from .security_agents_routes import router as security_agents_router
+from .executive_routes import router as executive_router
 
 # Export all routers
 all_routers = [
@@ -149,4 +154,9 @@ all_routers = [
     ai_intelligence_router,
     oneagent_ingest_router,
     oneagent_mgmt_router,
+    mitre_router,
+    vulnerability_router,
+    compliance_router,
+    security_agents_router,
+    executive_router,
 ]
