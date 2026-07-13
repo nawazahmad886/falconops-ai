@@ -6,6 +6,7 @@ import uuid
 import asyncio
 import json
 import numpy as np
+import httpx
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from scipy import stats
@@ -17,6 +18,24 @@ from ..core.database import db
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 METRICS_STREAM = "falcon:metrics:stream"
 METRICS_CONSUMER_GROUP = "falcon:metrics:processors"
+
+# VictoriaMetrics (real TSDB — optional dual-write target + preferred read path for
+# query_metrics(); MongoDB remains the system of record and the fallback if VM is
+# unreachable or hasn't been deployed).
+VM_URL = os.environ.get("VICTORIA_METRICS_URL", "http://localhost:8428")
+_VM_AGG_TO_FUNC = {
+    "avg": "avg_over_time",
+    "sum": "sum_over_time",
+    "min": "min_over_time",
+    "max": "max_over_time",
+    "count": "count_over_time",
+    "stddev": "stddev_over_time",
+    # MetricsQL rate() is a true per-second rate, unlike the naive (last-first)/count
+    # the MongoDB fallback path below uses for "rate" — a real improvement, not a
+    # behavior-preserving port.
+    "rate": "rate",
+}
+_VM_QUANTILES = {"p50": 0.5, "p90": 0.9, "p95": 0.95, "p99": 0.99}
 
 # Metric categories
 METRIC_CATEGORIES = {
@@ -168,15 +187,52 @@ class MetricsTimeSeriesService:
                 })
             if docs:
                 await db.metrics_timeseries.insert_many(docs)
+                await self._vm_write_batch(docs)
                 queued = len(docs)
-        
+
         return {"queued": queued, "timestamp": now}
-    
+
     async def _store_metric(self, metric_data: Dict):
-        """Store metric directly in MongoDB"""
+        """Store metric directly in MongoDB (system of record) and best-effort
+        dual-write to VictoriaMetrics (real TSDB backing query_metrics())."""
         metric_data["processed_at"] = datetime.now(timezone.utc).isoformat()
         await db.metrics_timeseries.insert_one(metric_data)
-    
+        await self._vm_write_batch([metric_data])
+
+    async def _vm_write_batch(self, docs: List[Dict]):
+        """Best-effort dual-write of metric points to VictoriaMetrics's JSON line
+        import endpoint. Never raises — a VictoriaMetrics outage (or it simply not
+        being deployed) must never break ingestion; MongoDB above is already the
+        durable write regardless of whether this succeeds."""
+        if not docs:
+            return
+        try:
+            lines = []
+            for metric_data in docs:
+                value = metric_data.get("value")
+                name = metric_data.get("name")
+                if value is None or not name:
+                    continue
+                ts_raw = metric_data.get("timestamp")
+                try:
+                    dt = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00")) if ts_raw else datetime.now(timezone.utc)
+                except Exception:
+                    dt = datetime.now(timezone.utc)
+                labels = {"__name__": name}
+                for k, v in (metric_data.get("tags") or {}).items():
+                    labels[str(k)] = str(v)
+                lines.append(json.dumps({
+                    "metric": labels,
+                    "values": [float(value)],
+                    "timestamps": [int(dt.timestamp() * 1000)],
+                }))
+            if not lines:
+                return
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                await client.post(f"{VM_URL}/api/v1/import", content="\n".join(lines))
+        except Exception as e:
+            print(f"VictoriaMetrics write error (non-fatal, MongoDB remains source of truth): {e}")
+
     # ==================== STREAM PROCESSING ====================
     
     async def process_stream(self, batch_size: int = 100, block_ms: int = 1000):
@@ -226,7 +282,8 @@ class MetricsTimeSeriesService:
                 # Batch insert to MongoDB
                 if docs:
                     await db.metrics_timeseries.insert_many(docs)
-                
+                    await self._vm_write_batch(docs)
+
                 # Acknowledge messages
                 if msg_ids:
                     await r.xack(METRICS_STREAM, METRICS_CONSUMER_GROUP, *msg_ids)
@@ -248,30 +305,48 @@ class MetricsTimeSeriesService:
         tenant_id: Optional[str] = None,
         limit: int = 10000
     ) -> Dict:
-        """Query metrics with aggregation and time bucketing"""
-        # Build query
-        query = {"name": metric_name}
-        
-        if tenant_id:
-            query["tenant_id"] = tenant_id
-        
-        if tags:
-            for key, value in tags.items():
-                query[f"tags.{key}"] = value
-        
-        # Time range
+        """Query metrics with aggregation and time bucketing.
+
+        Tries VictoriaMetrics first (native time-bucketed aggregation instead of
+        scanning raw Mongo docs into Python) and falls back to the original MongoDB
+        scan+bucket path unchanged on any failure, empty result, or when tenant_id is
+        set (VictoriaMetrics has no per-tenant label convention yet, so tenant-scoped
+        queries always use the MongoDB path, which already supports it).
+        """
         if not start_time:
             start_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
         if not end_time:
             end_time = datetime.now(timezone.utc).isoformat()
-        
+
+        bucket_seconds = TIME_BUCKETS.get(bucket, 300)
+
+        if not tenant_id:
+            vm_series = await self._vm_query_range(metric_name, tags, aggregation, bucket_seconds, start_time, end_time)
+            if vm_series:
+                return {
+                    "metric_name": metric_name,
+                    "aggregation": aggregation,
+                    "bucket": bucket,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "data_points": sum(p["count"] for p in vm_series),
+                    "series": vm_series,
+                    "source": "victoria_metrics",
+                }
+
+        # ── Fallback: original MongoDB scan+bucket path ──
+        query = {"name": metric_name}
+        if tenant_id:
+            query["tenant_id"] = tenant_id
+        if tags:
+            for key, value in tags.items():
+                query[f"tags.{key}"] = value
         query["timestamp"] = {"$gte": start_time, "$lte": end_time}
-        
-        # Fetch raw data
+
         raw_metrics = await db.metrics_timeseries.find(
             query, {"_id": 0, "value": 1, "timestamp": 1, "tags": 1, "anomaly": 1}
         ).sort("timestamp", 1).limit(limit).to_list(limit)
-        
+
         if not raw_metrics:
             return {
                 "metric_name": metric_name,
@@ -280,11 +355,9 @@ class MetricsTimeSeriesService:
                 "data_points": 0,
                 "series": []
             }
-        
-        # Time bucket aggregation
-        bucket_seconds = TIME_BUCKETS.get(bucket, 300)
+
         bucketed_data = self._bucket_metrics(raw_metrics, bucket_seconds, aggregation)
-        
+
         return {
             "metric_name": metric_name,
             "aggregation": aggregation,
@@ -292,9 +365,83 @@ class MetricsTimeSeriesService:
             "start_time": start_time,
             "end_time": end_time,
             "data_points": len(raw_metrics),
-            "series": bucketed_data
+            "series": bucketed_data,
+            "source": "mongodb",
         }
-    
+
+    def _vm_selector(self, metric_name: str, tags: Optional[Dict[str, str]]) -> str:
+        """Build a MetricsQL series selector, e.g. metric_name{host="web-1"}."""
+        if not tags:
+            return metric_name
+        filters = []
+        for k, v in tags.items():
+            val = str(v).replace("\\", "\\\\").replace('"', '\\"')
+            filters.append(f'{k}="{val}"')
+        return f'{metric_name}{{{",".join(filters)}}}'
+
+    async def _vm_raw_query_range(
+        self, selector: str, aggregation: str, bucket_seconds: int, start_time: str, end_time: str
+    ) -> Optional[Dict[str, float]]:
+        """Run one MetricsQL query_range call. Returns {iso_timestamp: value}, or None
+        on any failure, non-200 response, or when more than one series matches (the
+        caller can't meaningfully merge multiple series for a single-metric query, so
+        it bails out to the MongoDB fallback rather than guess)."""
+        if aggregation in _VM_QUANTILES:
+            query = f'quantile_over_time({_VM_QUANTILES[aggregation]}, {selector}[{bucket_seconds}s])'
+        else:
+            func = _VM_AGG_TO_FUNC.get(aggregation, "avg_over_time")
+            query = f'{func}({selector}[{bucket_seconds}s])'
+
+        try:
+            start_dt = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+            end_dt = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.get(f"{VM_URL}/api/v1/query_range", params={
+                    "query": query,
+                    "start": int(start_dt.timestamp()),
+                    "end": int(end_dt.timestamp()),
+                    "step": f"{bucket_seconds}s",
+                })
+            if resp.status_code != 200:
+                return None
+            result = resp.json().get("data", {}).get("result", [])
+            if len(result) != 1:
+                return None
+            out = {}
+            for ts, val in result[0].get("values", []):
+                try:
+                    out[datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()] = float(val)
+                except (TypeError, ValueError):
+                    continue
+            return out or None
+        except Exception as e:
+            print(f"VictoriaMetrics query error (falling back to MongoDB): {e}")
+            return None
+
+    async def _vm_query_range(
+        self, metric_name: str, tags: Optional[Dict[str, str]], aggregation: str,
+        bucket_seconds: int, start_time: str, end_time: str
+    ) -> Optional[List[Dict]]:
+        """Query VictoriaMetrics for a bucketed series, including real per-bucket
+        sample counts (via a second count_over_time query) so the response shape
+        matches the MongoDB path's series exactly. Returns None if VictoriaMetrics is
+        unreachable or has no matching data, so the caller falls back cleanly."""
+        selector = self._vm_selector(metric_name, tags)
+        values = await self._vm_raw_query_range(selector, aggregation, bucket_seconds, start_time, end_time)
+        if values is None:
+            return None
+        if aggregation == "count":
+            counts = values
+        else:
+            counts = await self._vm_raw_query_range(selector, "count", bucket_seconds, start_time, end_time) or {}
+
+        series = [
+            {"timestamp": ts, "value": round(value, 4), "count": int(counts.get(ts, 1))}
+            for ts, value in values.items()
+        ]
+        series.sort(key=lambda p: p["timestamp"])
+        return series or None
+
     def _bucket_metrics(self, metrics: List[Dict], bucket_seconds: int, aggregation: str) -> List[Dict]:
         """Bucket metrics by time interval and aggregate"""
         if not metrics:

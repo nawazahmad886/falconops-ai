@@ -32,15 +32,22 @@ from app.core.database import db, close_database
 # Import metrics processor
 from app.services.metrics_timeseries_service import metrics_timeseries_service
 
+# Import event bus (Kafka if reachable, MongoDB fallback otherwise)
+from app.services import kafka_pipeline
+from app.services import kafka_consumers
+
 # Background task for metrics processor
 metrics_processor_task = None
+
+# Background task for the Kafka/event-bus consumer
+kafka_consumer_task = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global metrics_processor_task
-    
+    global metrics_processor_task, kafka_consumer_task
+
     logger.info("Starting FalconOps AI...")
 
     # ─── ENV PREFLIGHT — surface misconfiguration clearly instead of cryptic
@@ -81,7 +88,20 @@ async def lifespan(app: FastAPI):
         logger.info("Metrics stream processor started")
     except Exception as e:
         logger.warning(f"Metrics processor init warning: {e}")
-    
+
+    # Connect the real event bus (Kafka if KAFKA_BOOTSTRAP_SERVERS is reachable —
+    # kafka_pipeline.py degrades to its MongoDB fallback automatically otherwise, so
+    # this is always safe to call even with no broker deployed).
+    try:
+        kafka_consumers.register_handlers()
+        kafka_bootstrap = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+        await kafka_pipeline.producer.connect(kafka_bootstrap)
+        await kafka_pipeline.consumer.connect(kafka_bootstrap)
+        kafka_consumer_task = asyncio.create_task(kafka_pipeline.consumer.start_consuming())
+        logger.info(f"Event bus started (mode={'kafka' if kafka_pipeline.producer.is_kafka else 'mongodb_fallback'})")
+    except Exception as e:
+        logger.warning(f"Event bus init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
     
     # Start uptime monitor scheduler
@@ -106,7 +126,20 @@ async def lifespan(app: FastAPI):
             await metrics_processor_task
         except asyncio.CancelledError:
             pass
-    
+
+    # Stop event bus consumer + close connections
+    if kafka_consumer_task:
+        kafka_consumer_task.cancel()
+        try:
+            await kafka_consumer_task
+        except asyncio.CancelledError:
+            pass
+    try:
+        await kafka_pipeline.consumer.close()
+        await kafka_pipeline.producer.close()
+    except Exception:
+        pass
+
     stop_monitoring_scheduler()
     stop_uptime_scheduler()
     stop_report_scheduler()

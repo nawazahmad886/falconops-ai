@@ -1,5 +1,9 @@
 """
 FalconOps AI - Kubernetes Auto-Healing Routes
+
+/execute and /executions/{id}/approve are DRY-RUN / PLAN-PREVIEW ONLY — they resolve
+and record kubectl commands but never run them against a real cluster. See
+app.services.k8s_healing_service module docstring.
 """
 from typing import Optional, List
 from fastapi import APIRouter, Depends, Query

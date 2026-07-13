@@ -110,11 +110,22 @@ class AlertEngine:
         }
         
         await db.alerts_engine.insert_one(alert_doc)
-        
+
         # Update alert statistics
         await self._update_stats(severity, "created")
-        
-        return {k: v for k, v in alert_doc.items() if k != "_id"}
+
+        clean_alert = {k: v for k, v in alert_doc.items() if k != "_id"}
+
+        # Publish to the real event bus (Kafka if connected, MongoDB fallback
+        # otherwise) — kafka_consumers.py's handler fans this out to the SOC live
+        # feed and a durable event_log record.
+        try:
+            from .kafka_pipeline import producer
+            await producer.send("alerts", clean_alert)
+        except Exception:
+            pass
+
+        return clean_alert
     
     async def acknowledge_alert(
         self,

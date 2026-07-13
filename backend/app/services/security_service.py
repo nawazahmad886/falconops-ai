@@ -170,6 +170,14 @@ class ThreatDetectionEngine:
                 await auto_remediate_threat(threat)
             except Exception as e:
                 logger.warning(f"Threat dispatch/remediation skipped: {e}")
+            # Publish to the real event bus (Kafka if connected, MongoDB fallback
+            # otherwise) — kafka_consumers.py's handler fans this out to the SOC
+            # live feed and a durable event_log record.
+            try:
+                from .kafka_pipeline import producer
+                await producer.send("threats", {k: v for k, v in threat.items() if k != "_id"})
+            except Exception as e:
+                logger.warning(f"Threat event publish skipped: {e}")
         except Exception as e:
             logger.error(f"Failed to store threat: {e}")
 

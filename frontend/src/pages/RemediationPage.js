@@ -86,6 +86,7 @@ export default function RemediationPage() {
                         <Wrench className="w-7 h-7 text-amber-400" /> Auto-Remediation
                     </h1>
                     <p className="text-sm text-white/40 mt-1">Automated response actions — block IPs, restart services, scale infrastructure</p>
+                    <p className="text-xs text-amber-400/80 mt-0.5">Dry-run preview only — commands are resolved and logged but never run against real infrastructure</p>
                 </div>
                 <Button variant="outline" size="sm" onClick={fetchData} className="border-white/10 text-xs">
                     <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
@@ -99,7 +100,7 @@ export default function RemediationPage() {
                         <p className="text-xs text-white/40">Total Executions</p><p className="text-2xl font-bold text-white mt-1">{stats.total_executions}</p>
                     </CardContent></Card>
                     <Card className="bg-[#0D1117] border-emerald-500/20"><CardContent className="p-4 text-center">
-                        <p className="text-xs text-emerald-400">Completed</p><p className="text-2xl font-bold text-emerald-400 mt-1">{stats.completed}</p>
+                        <p className="text-xs text-emerald-400">Previewed</p><p className="text-2xl font-bold text-emerald-400 mt-1">{stats.previewed}</p>
                     </CardContent></Card>
                     <Card className="bg-[#0D1117] border-blue-500/20"><CardContent className="p-4 text-center">
                         <p className="text-xs text-blue-400">Auto-Triggered</p><p className="text-2xl font-bold text-blue-400 mt-1">{stats.auto_triggered}</p>
@@ -152,7 +153,7 @@ export default function RemediationPage() {
                                     <p className="text-[10px] font-mono text-white/20 mb-3 truncate">{a.script_preview}</p>
                                     <Button size="sm" onClick={() => executeAction(a.id, {})} disabled={!!executing} className="w-full bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/30 text-xs" data-testid={`exec-${a.id}`}>
                                         {executing === a.id ? <RefreshCw className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Play className="w-3.5 h-3.5 mr-1.5" />}
-                                        Execute
+                                        Preview (dry-run)
                                     </Button>
                                 </CardContent>
                             </Card>
@@ -192,7 +193,7 @@ export default function RemediationPage() {
                                         <div className="flex items-center gap-2">
                                             <Badge className={`${RISK_STYLES[s.risk_level] || ''} border text-[9px]`}>{s.risk_level}</Badge>
                                             <Button size="sm" onClick={() => executeAction(s.action_id, s.pre_filled_params || {})} disabled={!!executing} className="text-xs bg-amber-500/20 text-amber-400 hover:bg-amber-500/30 border border-amber-500/30">
-                                                <Play className="w-3 h-3 mr-1" /> Run
+                                                <Play className="w-3 h-3 mr-1" /> Preview
                                             </Button>
                                         </div>
                                     </CardContent>
@@ -214,7 +215,7 @@ export default function RemediationPage() {
                                 {historyData.map((h, i) => (
                                     <div key={h.id || i} className="flex items-center justify-between p-3 rounded-lg bg-white/[0.02] border border-white/5" data-testid={`hist-${i}`}>
                                         <div className="flex items-center gap-3">
-                                            <CheckCircle className={`w-4 h-4 ${h.status === 'completed' ? 'text-emerald-400' : 'text-red-400'}`} />
+                                            <CheckCircle className={`w-4 h-4 ${h.status === 'previewed' ? 'text-emerald-400' : 'text-red-400'}`} />
                                             <div>
                                                 <p className="text-sm font-medium text-white/70">{h.action_name}</p>
                                                 <p className="text-[10px] font-mono text-white/30">{h.resolved_script}</p>

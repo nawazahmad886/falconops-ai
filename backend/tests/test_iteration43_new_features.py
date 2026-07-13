@@ -59,8 +59,8 @@ class TestAlertCorrelation:
     """Tests for NLP-based alert correlation feature"""
 
     def test_correlation_analyze_returns_groups(self, admin_headers):
-        """GET /api/correlation/analyze returns groups with noise_reduction_pct, top_keywords, similarity scores"""
-        response = requests.get(f"{BASE_URL}/api/correlation/analyze?hours=24", headers=admin_headers)
+        """GET /api/correlation/nlp/analyze returns groups with noise_reduction_pct, top_keywords, similarity scores"""
+        response = requests.get(f"{BASE_URL}/api/correlation/nlp/analyze?hours=24", headers=admin_headers)
         assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
         
         data = response.json()
@@ -95,8 +95,8 @@ class TestAlertCorrelation:
         print(f"Correlation analyze: {data['total_alerts']} alerts -> {data['correlation_groups']} groups ({data['noise_reduction_pct']}% noise reduction)")
 
     def test_correlation_stats_returns_summary(self, admin_headers):
-        """GET /api/correlation/stats returns summary statistics"""
-        response = requests.get(f"{BASE_URL}/api/correlation/stats?hours=24", headers=admin_headers)
+        """GET /api/correlation/nlp/stats returns summary statistics"""
+        response = requests.get(f"{BASE_URL}/api/correlation/nlp/stats?hours=24", headers=admin_headers)
         assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
         
         data = response.json()
@@ -108,8 +108,8 @@ class TestAlertCorrelation:
         print(f"Correlation stats: {data['total_alerts']} alerts, {data['groups']} groups")
 
     def test_correlation_config_get(self, admin_headers):
-        """GET /api/correlation/config returns settings"""
-        response = requests.get(f"{BASE_URL}/api/correlation/config", headers=admin_headers)
+        """GET /api/correlation/nlp/config returns settings"""
+        response = requests.get(f"{BASE_URL}/api/correlation/nlp/config", headers=admin_headers)
         assert response.status_code == 200, f"Expected 200, got {response.status_code}: {response.text}"
         
         data = response.json()
@@ -126,29 +126,29 @@ class TestAlertCorrelation:
         print(f"Correlation config: window={data['correlation_window_min']}min, threshold={data['similarity_threshold']}")
 
     def test_correlation_config_update_admin_only(self, admin_headers, viewer_headers):
-        """PUT /api/correlation/config updates settings (admin only)"""
+        """PUT /api/correlation/nlp/config updates settings (admin only)"""
         # First get current config
-        get_resp = requests.get(f"{BASE_URL}/api/correlation/config", headers=admin_headers)
+        get_resp = requests.get(f"{BASE_URL}/api/correlation/nlp/config", headers=admin_headers)
         original_config = get_resp.json()
-        
+
         # Try update as viewer - should fail
-        viewer_resp = requests.put(f"{BASE_URL}/api/correlation/config", 
+        viewer_resp = requests.put(f"{BASE_URL}/api/correlation/nlp/config",
             headers=viewer_headers,
             json={"correlation_window_min": 60})
         assert viewer_resp.status_code in [401, 403], f"Viewer should not update config: {viewer_resp.status_code}"
-        
+
         # Update as admin - should succeed
         new_window = 45
-        admin_resp = requests.put(f"{BASE_URL}/api/correlation/config",
+        admin_resp = requests.put(f"{BASE_URL}/api/correlation/nlp/config",
             headers=admin_headers,
             json={"correlation_window_min": new_window})
         assert admin_resp.status_code == 200, f"Admin update failed: {admin_resp.status_code}: {admin_resp.text}"
-        
+
         updated = admin_resp.json()
         assert updated["correlation_window_min"] == new_window, "Window not updated"
-        
+
         # Restore original
-        requests.put(f"{BASE_URL}/api/correlation/config",
+        requests.put(f"{BASE_URL}/api/correlation/nlp/config",
             headers=admin_headers,
             json={"correlation_window_min": original_config.get("correlation_window_min", 30)})
         
@@ -233,8 +233,8 @@ class TestK8sHealing:
         data = response.json()
         assert "id" in data
         assert "status" in data
-        # Low risk should auto-approve and execute
-        assert data["status"] in ["executed", "approved"], f"Low risk should auto-approve, got {data['status']}"
+        # Low risk should auto-approve and preview (dry-run — see k8s_healing_service docstring)
+        assert data["status"] in ["previewed", "approved"], f"Low risk should auto-approve, got {data['status']}"
         assert data["risk_level"] == "low"
         
         print(f"K8s execute low risk: status={data['status']}")
@@ -281,9 +281,9 @@ class TestK8sHealing:
         assert approve_resp.status_code == 200, f"Approve failed: {approve_resp.status_code}: {approve_resp.text}"
         
         data = approve_resp.json()
-        assert data["status"] == "executed", f"Expected executed, got {data['status']}"
-        
-        print(f"K8s approve: execution {execution_id} approved and executed")
+        assert data["status"] == "previewed", f"Expected previewed, got {data['status']}"
+
+        print(f"K8s approve: execution {execution_id} approved and previewed (dry-run)")
 
     def test_k8s_reject_pending_execution(self, admin_headers):
         """POST /api/k8s/executions/{id}/reject rejects pending"""
@@ -334,13 +334,13 @@ class TestK8sHealing:
         data = response.json()
         assert "total" in data
         assert "pending_approval" in data
-        assert "executed" in data
+        assert "previewed" in data
         assert "rejected" in data
-        
+
         assert isinstance(data["total"], int)
         assert isinstance(data["pending_approval"], int)
-        
-        print(f"K8s stats: total={data['total']}, pending={data['pending_approval']}, executed={data['executed']}, rejected={data['rejected']}")
+
+        print(f"K8s stats: total={data['total']}, pending={data['pending_approval']}, previewed={data['previewed']}, rejected={data['rejected']}")
 
 
 # ======================== USAGE BILLING TESTS ========================
@@ -463,9 +463,9 @@ class TestIntegration:
     def test_all_new_endpoints_accessible(self, admin_headers):
         """Verify all new endpoints are accessible"""
         endpoints = [
-            ("GET", "/api/correlation/analyze"),
-            ("GET", "/api/correlation/stats"),
-            ("GET", "/api/correlation/config"),
+            ("GET", "/api/correlation/nlp/analyze"),
+            ("GET", "/api/correlation/nlp/stats"),
+            ("GET", "/api/correlation/nlp/config"),
             ("GET", "/api/k8s/playbooks"),
             ("GET", "/api/k8s/executions"),
             ("GET", "/api/k8s/stats"),
@@ -487,7 +487,7 @@ class TestIntegration:
     def test_viewer_can_read_but_not_modify(self, viewer_headers, admin_headers):
         """Verify viewer role can read but not modify K8s/correlation config"""
         # Viewer can read correlation
-        read_resp = requests.get(f"{BASE_URL}/api/correlation/analyze", headers=viewer_headers)
+        read_resp = requests.get(f"{BASE_URL}/api/correlation/nlp/analyze", headers=viewer_headers)
         assert read_resp.status_code == 200, "Viewer should read correlation"
         
         # Viewer can read K8s playbooks

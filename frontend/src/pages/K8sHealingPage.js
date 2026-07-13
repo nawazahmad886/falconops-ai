@@ -20,7 +20,7 @@ const RISK_STYLES = {
     high: 'bg-red-500/15 text-red-400 border-red-500/30',
 };
 const STATUS_STYLES = {
-    executed: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    previewed: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
     pending_approval: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
     rejected: 'bg-red-500/15 text-red-400 border-red-500/30',
 };
@@ -92,7 +92,7 @@ export default function K8sHealingPage() {
     return (
         <div className="space-y-6" data-testid="k8s-healing-page">
             <div className="flex items-center justify-between">
-                <div><h1 className="text-2xl font-bold text-white flex items-center gap-3"><div className="p-2 rounded-lg bg-cyan-500/15"><Container className="w-6 h-6 text-cyan-400" /></div>K8s Auto-Healing</h1><p className="text-sm text-white/50 mt-1">Kubernetes remediation playbooks with approval workflow</p></div>
+                <div><h1 className="text-2xl font-bold text-white flex items-center gap-3"><div className="p-2 rounded-lg bg-cyan-500/15"><Container className="w-6 h-6 text-cyan-400" /></div>K8s Auto-Healing</h1><p className="text-sm text-white/50 mt-1">Kubernetes remediation playbooks with approval workflow</p><p className="text-xs text-amber-400/80 mt-0.5">Dry-run preview only — commands are resolved and logged but never run against a real cluster</p></div>
                 <Button variant="outline" size="sm" onClick={fetchData} disabled={loading} className="border-white/10 text-xs"><RefreshCw className={`w-3 h-3 mr-1 ${loading ? 'animate-spin' : ''}`} /> Refresh</Button>
             </div>
 
@@ -100,7 +100,7 @@ export default function K8sHealingPage() {
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                     <Card className="bg-[#0D1117] border-white/5"><CardContent className="p-4"><p className="text-xs text-white/50">Total</p><p className="text-lg font-bold text-white">{stats.total}</p></CardContent></Card>
                     <Card className="bg-[#0D1117] border-white/5"><CardContent className="p-4"><p className="text-xs text-white/50">Pending</p><p className="text-lg font-bold text-amber-400" data-testid="pending-count">{stats.pending_approval}</p></CardContent></Card>
-                    <Card className="bg-[#0D1117] border-white/5"><CardContent className="p-4"><p className="text-xs text-white/50">Executed</p><p className="text-lg font-bold text-emerald-400">{stats.executed}</p></CardContent></Card>
+                    <Card className="bg-[#0D1117] border-white/5"><CardContent className="p-4"><p className="text-xs text-white/50">Previewed</p><p className="text-lg font-bold text-emerald-400">{stats.previewed}</p></CardContent></Card>
                     <Card className="bg-[#0D1117] border-white/5"><CardContent className="p-4"><p className="text-xs text-white/50">Rejected</p><p className="text-lg font-bold text-red-400">{stats.rejected}</p></CardContent></Card>
                 </div>
             )}
@@ -135,7 +135,7 @@ export default function K8sHealingPage() {
                     <div>
                         {selectedPlaybook ? (
                             <Card className="bg-[#0D1117] border-white/5">
-                                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-base flex items-center gap-2"><Terminal className="w-4 h-4 text-cyan-400" /> Execute: {playbooks.find(p => p.id === selectedPlaybook)?.name}</CardTitle></CardHeader>
+                                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-base flex items-center gap-2"><Terminal className="w-4 h-4 text-cyan-400" /> Preview: {playbooks.find(p => p.id === selectedPlaybook)?.name}</CardTitle></CardHeader>
                                 <CardContent className="p-4 space-y-3">
                                     <div className="grid grid-cols-1 gap-2">
                                         {(paramFields[selectedPlaybook] || []).map(f => (
@@ -149,7 +149,7 @@ export default function K8sHealingPage() {
                                         </div>
                                     )}
                                     <Button onClick={executePlaybook} disabled={executing} className="bg-cyan-600 hover:bg-cyan-700 text-white" data-testid="execute-btn">
-                                        {executing ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />} Execute
+                                        {executing ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />} Preview (dry-run)
                                     </Button>
                                 </CardContent>
                             </Card>

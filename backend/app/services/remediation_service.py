@@ -1,6 +1,12 @@
 """
 FalconOps AI - Auto-Remediation Engine
-Automatic and manual remediation actions triggered by RCA findings, health violations, and security threats
+Automatic and manual remediation actions triggered by RCA findings, health violations, and security threats.
+
+IMPORTANT: execute_remediation() is DRY-RUN / PLAN-PREVIEW ONLY. It resolves the real
+command that would run and records it, but never invokes a subprocess, SSH session, or
+any infrastructure API — there is no live execution path in this module. Records are
+stored with status="previewed" and execution_mode="dry_run" to make this explicit to
+any caller or UI rendering them.
 """
 import uuid
 import logging
@@ -158,7 +164,11 @@ async def suggest_remediation(root_cause: str, context: Dict = None) -> List[Dic
 
 
 async def execute_remediation(action_id: str, params: Dict, trigger: str = "manual", triggered_by: str = "system") -> Dict:
-    """Execute a remediation action (simulated in sandbox mode)"""
+    """
+    Preview a remediation action: resolves the real command that would run and records
+    it for review. This is DRY-RUN ONLY — no subprocess, SSH, or infrastructure API call
+    is ever made. See module docstring.
+    """
     action = ACTION_LIBRARY.get(action_id)
     if not action:
         return {"error": f"Unknown action: {action_id}"}
@@ -172,7 +182,8 @@ async def execute_remediation(action_id: str, params: Dict, trigger: str = "manu
         "params": params,
         "trigger": trigger,
         "triggered_by": triggered_by,
-        "status": "executing",
+        "execution_mode": "dry_run",
+        "status": "previewing",
         "started_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -182,24 +193,28 @@ async def execute_remediation(action_id: str, params: Dict, trigger: str = "manu
         script = script.replace(f"{{{k}}}", str(v))
     record["resolved_script"] = script
 
-    # Simulate execution (in production, this would call actual systems)
+    # Brief delay to mirror what a real execution round-trip would feel like in the UI —
+    # nothing is actually run.
     await asyncio.sleep(0.5)
 
-    record["status"] = "completed"
+    record["status"] = "previewed"
     record["completed_at"] = datetime.now(timezone.utc).isoformat()
-    record["result"] = f"Action '{action['name']}' executed successfully (sandbox mode)"
+    record["result"] = (
+        f"[DRY RUN — NOT EXECUTED] '{action['name']}' was not run against real infrastructure. "
+        f"Command that would execute: {script}"
+    )
 
     await db.remediation_history.insert_one(record)
     record.pop("_id", None)
 
-    # Dispatch notification about remediation
+    # Dispatch notification about the preview
     try:
         from .connector_dispatcher import dispatch_event
         await dispatch_event("remediation", {
             "id": record["id"],
-            "type": "auto_remediation",
-            "title": f"Remediation Executed: {action['name']}",
-            "message": f"Action: {script}. Trigger: {trigger}. By: {triggered_by}",
+            "type": "auto_remediation_preview",
+            "title": f"Remediation Preview (Not Executed): {action['name']}",
+            "message": f"[DRY RUN] Command: {script}. Trigger: {trigger}. By: {triggered_by}",
             "severity": "info",
             "timestamp": record["completed_at"],
             "source": "FalconOps Remediation Engine",
@@ -250,11 +265,11 @@ async def get_remediation_history(limit: int = 50) -> List[Dict]:
 
 
 async def get_remediation_stats() -> Dict:
-    """Get remediation stats"""
+    """Get remediation stats. All executions are dry-run previews — see module docstring."""
     total = await db.remediation_history.count_documents({})
     auto = await db.remediation_history.count_documents({"trigger": "auto"})
     manual = await db.remediation_history.count_documents({"trigger": "manual"})
-    completed = await db.remediation_history.count_documents({"status": "completed"})
+    previewed = await db.remediation_history.count_documents({"status": "previewed"})
     failed = await db.remediation_history.count_documents({"status": "failed"})
 
     # By category
@@ -276,8 +291,9 @@ async def get_remediation_stats() -> Dict:
         "total_executions": total,
         "auto_triggered": auto,
         "manual_triggered": manual,
-        "completed": completed,
+        "previewed": previewed,
         "failed": failed,
+        "execution_mode": "dry_run",
         "by_category": [{"category": c["_id"], "count": c["count"]} for c in by_category],
         "by_action": [{"action": a["_id"], "count": a["count"]} for a in by_action],
     }

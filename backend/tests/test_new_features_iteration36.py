@@ -241,14 +241,19 @@ class TestKafkaPipeline(TestSetup):
     """Kafka Pipeline Module Tests - Event Streaming with MongoDB Fallback"""
     
     def test_get_kafka_stats(self, auth_headers):
-        """GET /api/kafka/stats should return pipeline stats with mode='mongodb_fallback'"""
+        """GET /api/kafka/stats should return pipeline stats. mode is now
+        environment-dependent: main.py connects to a real Kafka broker at startup if
+        KAFKA_BOOTSTRAP_SERVERS is reachable (mode='kafka'), and kafka_pipeline.py
+        falls back automatically to mode='mongodb_fallback' otherwise — both are
+        valid, unlike before this was wired up when 'mongodb_fallback' was the only
+        possible outcome."""
         response = requests.get(f"{BASE_URL}/api/kafka/stats", headers=auth_headers)
         assert response.status_code == 200, f"Failed: {response.text}"
         stats = response.json()
-        
+
         # Verify required fields
         assert "mode" in stats, "Stats should have 'mode'"
-        assert stats["mode"] == "mongodb_fallback", f"Expected mongodb_fallback mode, got {stats['mode']}"
+        assert stats["mode"] in ("kafka", "mongodb_fallback"), f"Unexpected mode: {stats['mode']}"
         assert "total_events" in stats, "Stats should have 'total_events'"
         assert "topics" in stats, "Stats should have 'topics'"
         

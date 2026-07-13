@@ -1,6 +1,8 @@
 """
 FalconOps AI - AI Correlation Engine
-Smart rule-based and AI-powered alert correlation for incident creation
+Real multi-signal alert correlation for incident creation: topology dependency,
+cross-host metric patterns, severity cascades, host grouping, and service grouping —
+all computed from live db.alerts / db.topology_nodes / db.topology_edges data.
 """
 import uuid
 import logging
@@ -14,124 +16,43 @@ from .websocket_manager import ws_manager
 logger = logging.getLogger(__name__)
 
 
-# ======================== CORRELATION RULES ========================
+# ======================== CORRELATION STRATEGIES ========================
+# Describes the real signal-grouping dimensions the engine below computes from live
+# alert/topology data. These are informational (surfaced to the UI / stats endpoint) —
+# unlike the old design, they do not gate matching via fixed if/then conditions.
 
-CORRELATION_RULES = [
+STRUCTURAL_TYPES = {"topology_dependency", "metric_pattern", "severity_cascade"}
+
+CORRELATION_STRATEGIES = [
     {
-        "id": "resource_saturation",
-        "name": "Resource Saturation",
-        "description": "High CPU + High Memory + Database connection issues indicate resource saturation",
-        "conditions": [
-            {"type": "metric", "source": "server", "metric": "cpu", "operator": "gt", "value": 85},
-            {"type": "metric", "source": "server", "metric": "memory", "operator": "gt", "value": 85},
-        ],
-        "root_cause": "Resource Saturation - Server under heavy load",
-        "suggested_actions": [
-            "Scale up server resources (CPU/Memory)",
-            "Identify and optimize resource-intensive processes",
-            "Consider horizontal scaling if persistent",
-            "Review recent deployments for memory leaks"
-        ],
-        "severity": "critical"
+        "id": "topology_dependency",
+        "name": "Topology Dependency",
+        "description": "Alerts on services that share a topology dependency edge (e.g. a common upstream database or gateway).",
+        "severity": "critical",
     },
     {
-        "id": "database_connection_pool",
-        "name": "Database Connection Pool Exhaustion",
-        "description": "APM latency spike + Database errors indicate connection pool issues",
-        "conditions": [
-            {"type": "alert_pattern", "title_contains": ["database", "connection", "pool", "timeout"]},
-            {"type": "metric", "source": "apm", "metric": "latency", "operator": "gt", "value": 2000},
-        ],
-        "root_cause": "Database Connection Pool Exhaustion",
-        "suggested_actions": [
-            "Increase database connection pool size",
-            "Review slow queries causing connection holding",
-            "Implement connection pooling if not present",
-            "Check for connection leaks in application code"
-        ],
-        "severity": "critical"
+        "id": "metric_pattern",
+        "name": "Metric Pattern Fleet-Wide",
+        "description": "The same metric (e.g. cpu, latency) alerting across multiple hosts at once — usually a systemic issue.",
+        "severity": "critical",
     },
     {
-        "id": "network_connectivity",
-        "name": "Network Connectivity Issues",
-        "description": "Multiple services down + Network errors indicate network issues",
-        "conditions": [
-            {"type": "alert_pattern", "title_contains": ["network", "timeout", "unreachable", "connection refused"]},
-            {"type": "service_count", "status": "down", "operator": "gt", "value": 2},
-        ],
-        "root_cause": "Network Connectivity Issues",
-        "suggested_actions": [
-            "Check network infrastructure (routers, switches, firewalls)",
-            "Verify DNS resolution",
-            "Review recent network configuration changes",
-            "Check for ISP or cloud provider issues"
-        ],
-        "severity": "critical"
+        "id": "severity_cascade",
+        "name": "Severity Cascade",
+        "description": "A burst of alerts across three or more services within the same time window — signals a cascading failure.",
+        "severity": "critical",
     },
     {
-        "id": "disk_space_critical",
-        "name": "Disk Space Critical",
-        "description": "Disk usage above 95% causing application failures",
-        "conditions": [
-            {"type": "metric", "source": "server", "metric": "disk", "operator": "gt", "value": 95},
-        ],
-        "root_cause": "Disk Space Critical",
-        "suggested_actions": [
-            "Clear old logs and temporary files",
-            "Expand disk volume",
-            "Set up log rotation",
-            "Identify and remove unused data"
-        ],
-        "severity": "critical"
+        "id": "same_host",
+        "name": "Same Host",
+        "description": "Multiple alerts firing on the same host/server.",
+        "severity": "warning",
     },
     {
-        "id": "ssl_certificate_expiry",
-        "name": "SSL Certificate Expiry",
-        "description": "SSL certificate warnings indicate upcoming expiry",
-        "conditions": [
-            {"type": "alert_pattern", "title_contains": ["ssl", "certificate", "expir", "tls"]},
-        ],
-        "root_cause": "SSL Certificate Expiring/Expired",
-        "suggested_actions": [
-            "Renew SSL certificate immediately",
-            "Set up automatic certificate renewal (Let's Encrypt)",
-            "Update certificate in load balancer/CDN",
-            "Notify affected service owners"
-        ],
-        "severity": "warning"
-    },
-    {
-        "id": "application_error_spike",
-        "name": "Application Error Spike",
-        "description": "High error rate indicates application issues",
-        "conditions": [
-            {"type": "alert_count", "severity": "critical", "time_window_minutes": 5, "operator": "gt", "value": 5},
-        ],
-        "root_cause": "Application Error Spike",
-        "suggested_actions": [
-            "Review recent code deployments",
-            "Check application logs for stack traces",
-            "Rollback if recently deployed",
-            "Identify error patterns and fix root cause"
-        ],
-        "severity": "critical"
-    },
-    {
-        "id": "cascading_failure",
-        "name": "Cascading Failure",
-        "description": "Multiple dependent services failing indicates cascade",
-        "conditions": [
-            {"type": "service_count", "status": "down", "operator": "gt", "value": 3},
-            {"type": "time_proximity", "minutes": 5},
-        ],
-        "root_cause": "Cascading Failure - Multiple services affected",
-        "suggested_actions": [
-            "Identify the root service causing cascade",
-            "Implement circuit breakers",
-            "Check shared dependencies (database, cache, message queue)",
-            "Failover to backup services if available"
-        ],
-        "severity": "critical"
+        "id": "same_service",
+        "name": "Same Service",
+        "description": "Multiple alerts firing on the same service.",
+        "severity": "warning",
     },
 ]
 
@@ -141,7 +62,7 @@ CORRELATION_RULES = [
 async def deduplicate_alert(alert: Dict[str, Any]) -> Optional[str]:
     """
     Check if a similar alert already exists and return its ID for deduplication.
-    
+
     Deduplication criteria:
     1. Same monitor_id or service
     2. Same severity
@@ -149,29 +70,24 @@ async def deduplicate_alert(alert: Dict[str, Any]) -> Optional[str]:
     4. Within time window (default 10 minutes)
     """
     time_window = datetime.now(timezone.utc) - timedelta(minutes=10)
-    
-    # Build query for similar alerts
+
     query = {
         "status": {"$in": ["open", "acknowledged"]},
         "created_at": {"$gte": time_window.isoformat()},
     }
-    
-    # Match by service if available
+
     if alert.get("service"):
         query["service"] = alert["service"]
-    
-    # Match by severity
+
     if alert.get("severity"):
         query["severity"] = alert["severity"]
-    
+
     existing_alerts = await db.alerts.find(query, {"_id": 0}).to_list(100)
-    
+
     for existing in existing_alerts:
-        # Check title similarity
         if is_similar_title(alert.get("title", ""), existing.get("title", "")):
             logger.info(f"Deduplicated alert: {alert.get('title')} matches existing {existing.get('id')}")
-            
-            # Update existing alert's occurrence count
+
             await db.alerts.update_one(
                 {"id": existing["id"]},
                 {
@@ -180,7 +96,7 @@ async def deduplicate_alert(alert: Dict[str, Any]) -> Optional[str]:
                 }
             )
             return existing["id"]
-    
+
     return None
 
 
@@ -188,38 +104,269 @@ def is_similar_title(title1: str, title2: str, threshold: float = 0.7) -> bool:
     """Check if two alert titles are similar using simple word overlap."""
     if not title1 or not title2:
         return False
-    
+
     words1 = set(title1.lower().split())
     words2 = set(title2.lower().split())
-    
-    # Remove common words
+
     stopwords = {"the", "a", "an", "is", "on", "for", "alert", "warning", "error", "critical"}
     words1 = words1 - stopwords
     words2 = words2 - stopwords
-    
+
     if not words1 or not words2:
         return title1.lower() == title2.lower()
-    
+
     intersection = words1 & words2
     union = words1 | words2
-    
+
     similarity = len(intersection) / len(union)
     return similarity >= threshold
+
+
+# ======================== TOPOLOGY LOADING ========================
+
+async def _load_topology(tenant_id: Optional[str] = None):
+    """Load the real service-dependency graph (shared with smart_correlation_engine)."""
+    query = {} if not tenant_id else {"tenant_id": tenant_id}
+    nodes = await db.topology_nodes.find(query, {"_id": 0}).to_list(500)
+    edges = await db.topology_edges.find(query, {"_id": 0}).to_list(1000)
+
+    service_map = {n["name"]: n for n in nodes if n.get("name")}
+    service_id_map = {n["id"]: n for n in nodes if n.get("id")}
+
+    upstream = defaultdict(set)    # child_id -> set(parent_ids)
+    downstream = defaultdict(set)  # parent_id -> set(child_ids)
+    for e in edges:
+        src, tgt = e.get("source_id"), e.get("target_id")
+        if src and tgt:
+            upstream[tgt].add(src)
+            downstream[src].add(tgt)
+
+    return service_map, service_id_map, upstream, downstream
+
+
+# ======================== REAL MULTI-DIMENSIONAL GROUPING ========================
+
+def _multi_dimension_group(
+    alerts: List[Dict[str, Any]],
+    service_map: Dict[str, Any],
+    service_id_map: Dict[str, Any],
+    upstream: Dict[str, set],
+    downstream: Dict[str, set],
+) -> List[Dict[str, Any]]:
+    """
+    Group alerts by topology dependency, cross-host metric pattern, severity cascade,
+    same host, and same service. Each alert may appear in more than one candidate group;
+    the caller resolves overlaps by processing groups highest-confidence-first and
+    skipping alerts already claimed by a higher-confidence group.
+    """
+    groups: List[Dict[str, Any]] = []
+    seen_id_sets = set()
+
+    service_alerts = defaultdict(list)
+    for a in alerts:
+        svc = a.get("service")
+        if svc:
+            service_alerts[svc].append(a)
+
+    # -- topology dependency: alerts on services sharing an upstream dependency --
+    for svc, svc_alerts in service_alerts.items():
+        node = service_map.get(svc)
+        if not node:
+            continue
+        for dep_id in upstream.get(node["id"], set()):
+            dep_node = service_id_map.get(dep_id)
+            if not dep_node:
+                continue
+            for sib_id in downstream.get(dep_id, set()):
+                if sib_id == node["id"]:
+                    continue
+                sib_node = service_id_map.get(sib_id)
+                if sib_node and sib_node["name"] in service_alerts:
+                    combined = svc_alerts + service_alerts[sib_node["name"]]
+                    ids = frozenset(a["id"] for a in combined)
+                    if ids not in seen_id_sets and len(combined) >= 2:
+                        seen_id_sets.add(ids)
+                        groups.append({
+                            "type": "topology_dependency",
+                            "reason": f"Shared dependency: {dep_node['name']} affects {svc} and {sib_node['name']}",
+                            "alerts": combined,
+                            "confidence": min(0.95, 0.75 + 0.05 * len(combined)),
+                        })
+
+    # -- metric pattern: same metric alerting across >=2 hosts --
+    metric_groups = defaultdict(list)
+    for a in alerts:
+        mn = a.get("metric_name")
+        if mn:
+            metric_groups[mn].append(a)
+    for metric, m_alerts in metric_groups.items():
+        hosts_affected = {a.get("host") for a in m_alerts if a.get("host")}
+        if len(hosts_affected) >= 2:
+            ids = frozenset(a["id"] for a in m_alerts)
+            if ids not in seen_id_sets:
+                seen_id_sets.add(ids)
+                groups.append({
+                    "type": "metric_pattern",
+                    "reason": f"{metric} anomaly across {len(hosts_affected)} hosts",
+                    "alerts": m_alerts,
+                    "confidence": min(0.9, 0.7 + 0.05 * len(hosts_affected)),
+                })
+
+    # -- severity cascade: many distinct services alerting within the same window --
+    services_in_batch = {a.get("service") for a in alerts if a.get("service")}
+    if len(services_in_batch) >= 3:
+        ids = frozenset(a["id"] for a in alerts)
+        if ids not in seen_id_sets:
+            seen_id_sets.add(ids)
+            groups.append({
+                "type": "severity_cascade",
+                "reason": f"{len(services_in_batch)} services alerting in the same window — possible cascading failure",
+                "alerts": list(alerts),
+                "confidence": min(0.9, 0.6 + 0.05 * len(services_in_batch)),
+            })
+
+    # -- same host --
+    host_groups = defaultdict(list)
+    for a in alerts:
+        host = a.get("host")
+        if host:
+            host_groups[host].append(a)
+    for host, h_alerts in host_groups.items():
+        if len(h_alerts) >= 2:
+            ids = frozenset(a["id"] for a in h_alerts)
+            if ids not in seen_id_sets:
+                seen_id_sets.add(ids)
+                groups.append({
+                    "type": "same_host",
+                    "reason": f"Multiple alerts on host {host}",
+                    "alerts": h_alerts,
+                    "confidence": 0.7,
+                })
+
+    # -- same service (fallback) --
+    for svc, svc_alerts in service_alerts.items():
+        if len(svc_alerts) >= 2:
+            ids = frozenset(a["id"] for a in svc_alerts)
+            if ids not in seen_id_sets:
+                seen_id_sets.add(ids)
+                groups.append({
+                    "type": "same_service",
+                    "reason": f"Multiple alerts on service {svc}",
+                    "alerts": svc_alerts,
+                    "confidence": 0.6,
+                })
+
+    groups.sort(key=lambda g: g["confidence"], reverse=True)
+    return groups
+
+
+def _root_cause_and_actions(group_type: str, reason: str, alerts: List[Dict[str, Any]]):
+    """Keyword-driven action suggestions from the real alerts in the group (enrichment, not a gate)."""
+    text = " ".join(
+        f"{a.get('metric_name', '') or ''} {a.get('title', '') or ''}" for a in alerts
+    ).lower()
+
+    actions: List[str] = []
+    if "cpu" in text:
+        actions.append("Scale up CPU resources or identify CPU-intensive processes")
+    if "memory" in text:
+        actions.append("Investigate memory leaks / increase allocation")
+    if "disk" in text:
+        actions.append("Clear old logs, expand disk volume, set up log rotation")
+    if "connection" in text or "pool" in text or "timeout" in text:
+        actions.append("Check connection pool sizing and for connection leaks")
+    if "network" in text or "unreachable" in text or "refused" in text:
+        actions.append("Check network infrastructure, DNS, and firewall rules")
+    if "ssl" in text or "certificate" in text or "expir" in text:
+        actions.append("Renew SSL certificate and enable auto-renewal")
+
+    if group_type == "topology_dependency":
+        actions.insert(0, "Investigate the shared upstream dependency first — likely root cause")
+    elif group_type == "severity_cascade":
+        actions.insert(0, "Address the earliest-alerting service first — likely cascade origin")
+
+    if not actions:
+        actions = ["Review alert details and recent changes", "Check service logs", "Investigate correlated services"]
+
+    return reason, actions[:5]
+
+
+async def _create_incident_from_group(
+    group_type: str,
+    reason: str,
+    confidence: float,
+    alerts: List[Dict[str, Any]],
+    context: Dict[str, Any],
+    tenant_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if not alerts:
+        return None
+
+    incident_id = str(uuid.uuid4())
+    alert_ids = [a["id"] for a in alerts]
+    services = list({a.get("service", "unknown") for a in alerts})
+    primary_service = services[0] if services else "unknown"
+
+    severity_order = {"critical": 3, "warning": 2, "info": 1}
+    top_alert = max(alerts, key=lambda a: severity_order.get(a.get("severity", "info"), 0))
+    severity = top_alert.get("severity", "warning")
+
+    root_cause, suggested_actions = _root_cause_and_actions(group_type, reason, alerts)
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    incident = {
+        "id": incident_id,
+        "title": f"{reason} ({len(alerts)} alerts)"[:160],
+        "description": reason,
+        "severity": severity,
+        "status": "open",
+        "service": primary_service,
+        "affected_services": services,
+        "alert_count": len(alerts),
+        "alert_ids": alert_ids,
+        "correlation_rule_id": group_type if group_type in STRUCTURAL_TYPES else None,
+        "correlation_type": group_type,
+        "root_cause": root_cause,
+        "suggested_actions": suggested_actions,
+        "ai_analysis": {
+            "correlation_type": group_type,
+            "confidence": round(confidence, 2),
+            "context": context,
+        },
+        "tenant_id": tenant_id,
+        "created_at": now_iso,
+        "updated_at": now_iso,
+        "resolved_at": None,
+        "mttr_seconds": None,
+    }
+
+    await db.incidents.insert_one(incident)
+    await db.alerts.update_many({"id": {"$in": alert_ids}}, {"$set": {"incident_id": incident_id}})
+
+    await ws_manager.broadcast({
+        "type": "new_incident",
+        "data": {k: v for k, v in incident.items() if k != "_id"}
+    })
+
+    logger.info(
+        f"Created incident {incident_id} via '{group_type}' correlation with "
+        f"{len(alerts)} alerts (confidence={confidence:.2f})"
+    )
+    return {k: v for k, v in incident.items() if k != "_id"}
 
 
 # ======================== CORRELATION ENGINE ========================
 
 async def correlate_alerts(time_window_minutes: int = 15, tenant_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Correlate alerts into incidents using rule-based correlation.
-    Returns list of newly created incidents.
-    Supports multi-tenancy via tenant_id parameter.
+    Correlate alerts into incidents using real multi-signal grouping
+    (topology dependency, metric pattern, severity cascade, host, service).
+    Returns list of newly created incidents. Supports multi-tenancy via tenant_id.
     """
     logger.info("Running alert correlation engine...")
-    
+
     time_threshold = datetime.now(timezone.utc) - timedelta(minutes=time_window_minutes)
-    
-    # Build query with tenant support
+
     query = {
         "incident_id": None,
         "status": {"$in": ["open", "acknowledged"]},
@@ -227,310 +374,60 @@ async def correlate_alerts(time_window_minutes: int = 15, tenant_id: Optional[st
     }
     if tenant_id:
         query["tenant_id"] = tenant_id
-    
-    # Get uncorrelated alerts within time window
+
     uncorrelated_alerts = await db.alerts.find(query, {"_id": 0}).to_list(500)
-    
+
     if not uncorrelated_alerts:
         logger.info("No uncorrelated alerts to process")
         return []
-    
+
     logger.info(f"Processing {len(uncorrelated_alerts)} uncorrelated alerts")
-    
-    # Get current server metrics for context
+
+    service_map, service_id_map, upstream, downstream = await _load_topology(tenant_id)
+
+    # Real current-state signals, attached to created incidents as RCA context
+    # (informational enrichment only — they no longer gate whether a group forms).
     server_metrics = await get_current_server_metrics()
     apm_metrics = await get_current_apm_metrics()
-    
-    # Get service status counts
     service_status = await get_service_status_counts()
-    
-    # Try to match against correlation rules
+    context = {"server_metrics": server_metrics, "apm_metrics": apm_metrics, "service_status": service_status}
+
+    groups = _multi_dimension_group(uncorrelated_alerts, service_map, service_id_map, upstream, downstream)
+
     created_incidents = []
-    
-    for rule in CORRELATION_RULES:
-        if await evaluate_rule(rule, uncorrelated_alerts, server_metrics, apm_metrics, service_status):
-            # Find matching alerts for this rule
-            matching_alerts = await find_matching_alerts_for_rule(rule, uncorrelated_alerts)
-            
-            if matching_alerts:
-                # Create incident
-                incident = await create_incident_from_rule(rule, matching_alerts)
-                if incident:
-                    created_incidents.append(incident)
-                    
-                    # Remove matched alerts from uncorrelated list
-                    matched_ids = {a["id"] for a in matching_alerts}
-                    uncorrelated_alerts = [a for a in uncorrelated_alerts if a["id"] not in matched_ids]
-    
-    # Group remaining alerts by service/time proximity
-    if uncorrelated_alerts:
-        service_grouped = await group_alerts_by_service(uncorrelated_alerts)
-        for service, alerts in service_grouped.items():
-            if len(alerts) >= 2:
-                incident = await create_generic_incident(service, alerts)
-                if incident:
-                    created_incidents.append(incident)
-    
-    logger.info(f"Created {len(created_incidents)} new incidents from correlation")
+    claimed_ids = set()
+    for group in groups:
+        group_alerts = [a for a in group["alerts"] if a["id"] not in claimed_ids]
+        if len(group_alerts) < 2:
+            continue
+        incident = await _create_incident_from_group(
+            group["type"], group["reason"], group["confidence"], group_alerts, context, tenant_id
+        )
+        if incident:
+            created_incidents.append(incident)
+            claimed_ids.update(a["id"] for a in group_alerts)
+
+    logger.info(
+        f"Created {len(created_incidents)} new incidents from correlation "
+        f"({len(claimed_ids)}/{len(uncorrelated_alerts)} alerts correlated)"
+    )
     return created_incidents
 
 
-async def evaluate_rule(
-    rule: Dict[str, Any],
-    alerts: List[Dict[str, Any]],
-    server_metrics: Dict[str, Any],
-    apm_metrics: Dict[str, Any],
-    service_status: Dict[str, int]
-) -> bool:
-    """Evaluate if a correlation rule matches current conditions."""
-    conditions_met = 0
-    total_conditions = len(rule.get("conditions", []))
-    
-    for condition in rule.get("conditions", []):
-        cond_type = condition.get("type")
-        
-        if cond_type == "metric":
-            source = condition.get("source")
-            metric = condition.get("metric")
-            operator = condition.get("operator")
-            value = condition.get("value")
-            
-            if source == "server":
-                current_value = server_metrics.get(f"avg_{metric}", 0)
-            elif source == "apm":
-                current_value = apm_metrics.get(f"avg_{metric}", 0)
-            else:
-                continue
-            
-            if evaluate_operator(current_value, operator, value):
-                conditions_met += 1
-        
-        elif cond_type == "alert_pattern":
-            title_contains = condition.get("title_contains", [])
-            for alert in alerts:
-                title_lower = alert.get("title", "").lower()
-                if any(pattern.lower() in title_lower for pattern in title_contains):
-                    conditions_met += 1
-                    break
-        
-        elif cond_type == "service_count":
-            status = condition.get("status")
-            operator = condition.get("operator")
-            value = condition.get("value")
-            
-            count = service_status.get(status, 0)
-            if evaluate_operator(count, operator, value):
-                conditions_met += 1
-        
-        elif cond_type == "alert_count":
-            severity = condition.get("severity")
-            time_window = condition.get("time_window_minutes", 5)
-            operator = condition.get("operator")
-            value = condition.get("value")
-            
-            threshold = datetime.now(timezone.utc) - timedelta(minutes=time_window)
-            count = sum(
-                1 for a in alerts 
-                if a.get("severity") == severity 
-                and a.get("created_at", "") >= threshold.isoformat()
-            )
-            
-            if evaluate_operator(count, operator, value):
-                conditions_met += 1
-        
-        elif cond_type == "time_proximity":
-            # Check if multiple alerts occurred within specified minutes
-            minutes = condition.get("minutes", 5)
-            if len(alerts) >= 2:
-                timestamps = sorted([a.get("created_at", "") for a in alerts])
-                if timestamps:
-                    first = datetime.fromisoformat(timestamps[0].replace("Z", "+00:00"))
-                    last = datetime.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
-                    if (last - first).total_seconds() <= minutes * 60:
-                        conditions_met += 1
-    
-    # Rule matches if all conditions are met (AND logic)
-    return conditions_met >= total_conditions and total_conditions > 0
-
-
-def evaluate_operator(value: float, operator: str, threshold: float) -> bool:
-    """Evaluate comparison operator."""
-    if operator == "gt":
-        return value > threshold
-    elif operator == "lt":
-        return value < threshold
-    elif operator == "gte":
-        return value >= threshold
-    elif operator == "lte":
-        return value <= threshold
-    elif operator == "eq":
-        return value == threshold
-    return False
-
-
-async def find_matching_alerts_for_rule(
-    rule: Dict[str, Any],
-    alerts: List[Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    """Find alerts that match a specific correlation rule."""
-    matching = []
-    
-    for condition in rule.get("conditions", []):
-        if condition.get("type") == "alert_pattern":
-            title_contains = condition.get("title_contains", [])
-            for alert in alerts:
-                title_lower = alert.get("title", "").lower()
-                if any(pattern.lower() in title_lower for pattern in title_contains):
-                    if alert not in matching:
-                        matching.append(alert)
-    
-    # If no pattern matching, get alerts by severity
-    if not matching and rule.get("severity"):
-        matching = [a for a in alerts if a.get("severity") == rule["severity"]][:10]
-    
-    return matching
-
-
-async def create_incident_from_rule(
-    rule: Dict[str, Any],
-    alerts: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    """Create an incident based on a matched correlation rule."""
-    if not alerts:
-        return None
-    
-    incident_id = str(uuid.uuid4())
-    alert_ids = [a["id"] for a in alerts]
-    
-    # Determine service from alerts
-    services = list(set(a.get("service", "unknown") for a in alerts))
-    primary_service = services[0] if services else "unknown"
-    
-    incident = {
-        "id": incident_id,
-        "title": f"{rule['name']} - {primary_service}",
-        "description": rule.get("description", ""),
-        "severity": rule.get("severity", "warning"),
-        "status": "open",
-        "service": primary_service,
-        "affected_services": services,
-        "alert_count": len(alerts),
-        "alert_ids": alert_ids,
-        "correlation_rule_id": rule["id"],
-        "root_cause": rule.get("root_cause"),
-        "suggested_actions": rule.get("suggested_actions", []),
-        "ai_analysis": {
-            "correlation_type": "rule_based",
-            "rule_name": rule["name"],
-            "confidence": 0.85
-        },
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "resolved_at": None,
-        "mttr_seconds": None
-    }
-    
-    await db.incidents.insert_one(incident)
-    
-    # Update alerts with incident ID
-    await db.alerts.update_many(
-        {"id": {"$in": alert_ids}},
-        {"$set": {"incident_id": incident_id}}
-    )
-    
-    # Broadcast new incident
-    await ws_manager.broadcast({
-        "type": "new_incident",
-        "data": {k: v for k, v in incident.items() if k != "_id"}
-    })
-    
-    logger.info(f"Created incident {incident_id} from rule '{rule['name']}' with {len(alerts)} alerts")
-    return {k: v for k, v in incident.items() if k != "_id"}
-
-
-async def create_generic_incident(
-    service: str,
-    alerts: List[Dict[str, Any]]
-) -> Optional[Dict[str, Any]]:
-    """Create a generic incident from grouped alerts."""
-    if len(alerts) < 2:
-        return None
-    
-    incident_id = str(uuid.uuid4())
-    alert_ids = [a["id"] for a in alerts]
-    
-    # Determine severity from highest alert severity
-    severity_order = {"critical": 3, "warning": 2, "info": 1}
-    max_severity = max(alerts, key=lambda a: severity_order.get(a.get("severity", "info"), 0))
-    
-    incident = {
-        "id": incident_id,
-        "title": f"Multiple Alerts - {service}",
-        "description": f"{len(alerts)} related alerts detected for {service}",
-        "severity": max_severity.get("severity", "warning"),
-        "status": "open",
-        "service": service,
-        "affected_services": [service],
-        "alert_count": len(alerts),
-        "alert_ids": alert_ids,
-        "correlation_rule_id": None,
-        "root_cause": None,
-        "suggested_actions": [
-            "Review alert details",
-            "Check service logs",
-            "Investigate recent changes"
-        ],
-        "ai_analysis": {
-            "correlation_type": "proximity_grouping",
-            "confidence": 0.6
-        },
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-        "resolved_at": None,
-        "mttr_seconds": None
-    }
-    
-    await db.incidents.insert_one(incident)
-    
-    # Update alerts with incident ID
-    await db.alerts.update_many(
-        {"id": {"$in": alert_ids}},
-        {"$set": {"incident_id": incident_id}}
-    )
-    
-    # Broadcast new incident
-    await ws_manager.broadcast({
-        "type": "new_incident",
-        "data": {k: v for k, v in incident.items() if k != "_id"}
-    })
-    
-    logger.info(f"Created generic incident {incident_id} for service '{service}' with {len(alerts)} alerts")
-    return {k: v for k, v in incident.items() if k != "_id"}
-
-
-async def group_alerts_by_service(alerts: List[Dict[str, Any]]) -> Dict[str, List[Dict[str, Any]]]:
-    """Group alerts by service."""
-    grouped = defaultdict(list)
-    for alert in alerts:
-        service = alert.get("service", "unknown")
-        grouped[service].append(alert)
-    return dict(grouped)
-
-
-# ======================== HELPER FUNCTIONS ========================
+# ======================== HELPER FUNCTIONS (real signals, used as enrichment context) ========================
 
 async def get_current_server_metrics() -> Dict[str, Any]:
     """Get aggregated server metrics."""
     servers = await db.servers.find({"status": {"$ne": "offline"}}, {"_id": 0}).to_list(100)
-    
+
     if not servers:
         return {}
-    
+
     total_cpu = sum(s.get("cpu_usage", 0) or 0 for s in servers)
     total_memory = sum(s.get("memory_usage", 0) or 0 for s in servers)
     total_disk = sum(s.get("disk_usage", 0) or 0 for s in servers)
     count = len(servers)
-    
+
     return {
         "avg_cpu": total_cpu / count if count > 0 else 0,
         "avg_memory": total_memory / count if count > 0 else 0,
@@ -542,14 +439,14 @@ async def get_current_server_metrics() -> Dict[str, Any]:
 async def get_current_apm_metrics() -> Dict[str, Any]:
     """Get aggregated APM metrics."""
     time_threshold = datetime.now(timezone.utc) - timedelta(minutes=15)
-    
+
     transactions = await db.apm_transactions.find({
         "start_time": {"$gte": time_threshold.isoformat()}
     }, {"_id": 0, "duration_ms": 1}).to_list(1000)
-    
+
     if not transactions:
         return {"avg_latency": 0}
-    
+
     durations = [t.get("duration_ms", 0) for t in transactions]
     return {
         "avg_latency": sum(durations) / len(durations) if durations else 0,
@@ -560,7 +457,7 @@ async def get_current_apm_metrics() -> Dict[str, Any]:
 async def get_service_status_counts() -> Dict[str, int]:
     """Get count of services by status."""
     monitors = await db.monitors.find({}, {"_id": 0, "status": 1}).to_list(500)
-    
+
     counts = defaultdict(int)
     for m in monitors:
         status = m.get("status", "unknown")
@@ -572,7 +469,7 @@ async def get_service_status_counts() -> Dict[str, int]:
             counts["degraded"] += 1
         else:
             counts["unknown"] += 1
-    
+
     return dict(counts)
 
 
@@ -596,8 +493,8 @@ async def run_correlation_cycle(tenant_id: Optional[str] = None):
 
 
 async def get_correlation_rules() -> List[Dict[str, Any]]:
-    """Get all correlation rules."""
-    return CORRELATION_RULES
+    """Get the real correlation strategies applied by the engine."""
+    return CORRELATION_STRATEGIES
 
 
 async def get_correlation_stats(tenant_id: Optional[str] = None) -> Dict[str, Any]:
@@ -605,15 +502,19 @@ async def get_correlation_stats(tenant_id: Optional[str] = None) -> Dict[str, An
     query = {}
     if tenant_id:
         query["tenant_id"] = tenant_id
-        
+
     total_incidents = await db.incidents.count_documents(query)
-    rule_based = await db.incidents.count_documents({**query, "correlation_rule_id": {"$ne": None}})
-    auto_grouped = await db.incidents.count_documents({**query, "correlation_rule_id": None})
-    
+    structural_incidents = await db.incidents.count_documents(
+        {**query, "correlation_rule_id": {"$in": list(STRUCTURAL_TYPES)}}
+    )
+    simple_grouped_incidents = await db.incidents.count_documents(
+        {**query, "correlation_type": {"$in": ["same_host", "same_service"]}}
+    )
+
     return {
         "total_incidents": total_incidents,
-        "rule_based_incidents": rule_based,
-        "auto_grouped_incidents": auto_grouped,
-        "correlation_rules_count": len(CORRELATION_RULES),
-        "rules": [{"id": r["id"], "name": r["name"]} for r in CORRELATION_RULES]
+        "rule_based_incidents": structural_incidents,
+        "auto_grouped_incidents": simple_grouped_incidents,
+        "correlation_rules_count": len(CORRELATION_STRATEGIES),
+        "rules": CORRELATION_STRATEGIES,
     }

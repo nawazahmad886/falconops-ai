@@ -33,26 +33,38 @@ of `install-rhel.sh` for `--llm-provider`, `--skip-docker`, `--skip-firewall`.
 | SELinux helpers | `policycoreutils-python-utils` | `policycoreutils-python-utils` |
 | Misc | `git`, `curl` | `git`, `curl` |
 
-Everything else (Python 3.12, Node 22, MongoDB 8, Redis 7, nginx) lives **inside** the containers
-built from `backend/Dockerfile` / `frontend/Dockerfile` / the `mongo:8`, `redis:7-alpine`,
-`nginx:alpine` images in `docker-compose.yml` — nothing else needs to be installed on the host.
+Everything else (Python 3.12, Node 22, MongoDB 8, Redis 7, VictoriaMetrics, Kafka, nginx) lives
+**inside** the containers built from `backend/Dockerfile` / `frontend/Dockerfile` / the `mongo:8`,
+`redis:7-alpine`, `victoriametrics/victoria-metrics:stable`, `apache/kafka:3.8.0` (KRaft mode, no
+Zookeeper), `nginx:alpine` images in `docker-compose.yml` — nothing else needs to be installed on
+the host. VictoriaMetrics (real metrics TSDB) and Kafka (real event bus) are optional-but-
+recommended: the backend degrades gracefully to its existing MongoDB-backed paths if either is
+unreachable, so the stack still runs without them, just without the scale/decoupling benefits.
 
 `install-rhel.sh` installs the table above for you; it's listed here for anyone who wants to
 provision the host through their own config-management tooling instead.
 
 ## 2. Resource sizing
 
-torch + transformers + chromadb + Mongo + Redis running together want, at minimum:
+torch + transformers + chromadb + Mongo + Redis + VictoriaMetrics + Kafka running together want,
+at minimum:
 
-- **4 vCPU / 8 GB RAM / 20+ GB disk** (first `docker compose build` pulls multi-GB ML wheels)
+- **6 vCPU / 12 GB RAM / 30+ GB disk** (Kafka's JVM alone wants real heap; first
+  `docker compose build` also pulls multi-GB ML wheels)
 - Outbound internet access during build (PyPI, npm registry, Docker Hub) unless you're mirroring
+
+If you don't need the real event bus / TSDB yet, you can comment out the `kafka` and
+`victoria-metrics` services (and their `depends_on` entries under `backend`) in
+`docker-compose.yml` and drop back to the 4 vCPU / 8 GB sizing — the backend falls back to its
+MongoDB-backed paths automatically.
 
 ## 3. Network exposure
 
-`docker-compose.yml` publishes `mongo` (27017), `redis` (6379), `backend` (8001) and `frontend`
-(3000) to `127.0.0.1` only — nginx (`80`/`443`) is the sole service reachable from the network.
-Neither Mongo nor Redis has auth configured in this compose file, so **do not** change those
-bindings to `0.0.0.0` without adding auth first.
+`docker-compose.yml` publishes `mongo` (27017), `redis` (6379), `victoria-metrics` (8428), `kafka`
+(9092), `backend` (8001) and `frontend` (3000) to `127.0.0.1` only — nginx (`80`/`443`) is the sole
+service reachable from the network. Neither Mongo, Redis, VictoriaMetrics, nor Kafka has auth
+configured in this compose file, so **do not** change those bindings to `0.0.0.0` without adding
+auth first.
 
 ## 4. TLS
 

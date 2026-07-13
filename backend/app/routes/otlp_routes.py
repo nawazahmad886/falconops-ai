@@ -1,16 +1,24 @@
 """
-FalconOps AI — OTLP HTTP Trace Ingestion
-Accepts OpenTelemetry OTLP/HTTP payloads from customer APM agents and stores
-them as spans in Mongo. Auto-builds the service dependency graph from
-parent_service → child_service relationships.
+FalconOps AI — OTLP HTTP Ingestion
+Accepts OpenTelemetry OTLP/HTTP JSON payloads from customer APM agents (traces,
+metrics, logs) and stores them for real use elsewhere in the platform:
+  - traces  → db.otel_spans / db.otel_traces, plus auto-discovered service
+              dependency edges in both db.service_dependencies and
+              db.topology_nodes/db.topology_edges (the latter feeds
+              smart_correlation_engine.py / ai_correlation.py's topology-aware
+              alert correlation).
+  - metrics → real datapoint values (gauge/sum/histogram/summary) into
+              db.metrics_timeseries, the same store anomaly_detection_engine.py
+              reads — not just a discarded counter.
+  - logs    → db.otel_logs for the existing log analyzer.
 
 Endpoints:
-  POST /v1/traces    — OTLP/HTTP ResourceSpans payload (JSON)
-  POST /v1/metrics   — accepted for protocol compatibility (parses to monitor metrics later)
-  POST /v1/logs      — accepted for protocol compatibility (forwards to event store)
+  POST /v1/traces
+  POST /v1/metrics
+  POST /v1/logs
 
-Designed to fit alongside the existing /api/* routes — uses unprefixed /v1/* so
-standard OpenTelemetry exporters work without configuration changes.
+Only OTLP/HTTP+JSON is supported (not protobuf/gRPC), so exporters must be
+configured with OTEL_EXPORTER_OTLP_PROTOCOL=http/json.
 """
 import logging
 import uuid
@@ -23,6 +31,8 @@ from pydantic import BaseModel
 from ..core.database import db
 from ..utils.auth import require_auth
 from ..services import trace_rca_service, trace_alert_engine
+from ..services.topology_service import topology_service
+from ..services.metrics_timeseries_service import metrics_timeseries_service
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +112,73 @@ def _normalize_span(span: Dict, resource_attrs: Dict, scope_name: str) -> Dict:
     }
 
 
+def _numeric_point_value(point: Dict) -> Optional[float]:
+    """OTLP numeric data points carry either asDouble or asInt (string)."""
+    if "asDouble" in point:
+        return point["asDouble"]
+    if "asInt" in point:
+        try:
+            return float(point["asInt"])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _normalize_metric_points(body: Dict) -> List[Dict]:
+    """Flatten an OTLP/HTTP metrics payload into metrics_timeseries_service.ingest_batch() rows."""
+    points: List[Dict] = []
+    for resource_metric in body.get("resourceMetrics", []):
+        resource_attrs = _attrs_to_dict(resource_metric.get("resource", {}).get("attributes", []))
+        service = resource_attrs.get("service.name") or resource_attrs.get("service") or "unknown-service"
+        for scope_metric in resource_metric.get("scopeMetrics", []):
+            for metric in scope_metric.get("metrics", []):
+                name = metric.get("name") or "unknown_metric"
+                unit = metric.get("unit", "")
+
+                for dp in (metric.get("gauge") or {}).get("dataPoints", []):
+                    value = _numeric_point_value(dp)
+                    if value is None:
+                        continue
+                    points.append({
+                        "name": name, "value": value, "unit": unit, "type": "gauge",
+                        "timestamp": _ns_to_iso(dp.get("timeUnixNano", "0")),
+                        "tags": {"service": service, **_attrs_to_dict(dp.get("attributes") or [])},
+                    })
+
+                for dp in (metric.get("sum") or {}).get("dataPoints", []):
+                    value = _numeric_point_value(dp)
+                    if value is None:
+                        continue
+                    points.append({
+                        "name": name, "value": value, "unit": unit, "type": "counter",
+                        "timestamp": _ns_to_iso(dp.get("timeUnixNano", "0")),
+                        "tags": {"service": service, **_attrs_to_dict(dp.get("attributes") or [])},
+                    })
+
+                for dp in (metric.get("histogram") or {}).get("dataPoints", []):
+                    count = dp.get("count", 0) or 0
+                    total = dp.get("sum", 0) or 0
+                    if not count:
+                        continue
+                    points.append({
+                        "name": name, "value": total / count, "unit": unit, "type": "histogram",
+                        "timestamp": _ns_to_iso(dp.get("timeUnixNano", "0")),
+                        "tags": {"service": service, "sample_count": count, **_attrs_to_dict(dp.get("attributes") or [])},
+                    })
+
+                for dp in (metric.get("summary") or {}).get("dataPoints", []):
+                    count = dp.get("count", 0) or 0
+                    total = dp.get("sum", 0) or 0
+                    if not count:
+                        continue
+                    points.append({
+                        "name": name, "value": total / count, "unit": unit, "type": "summary",
+                        "timestamp": _ns_to_iso(dp.get("timeUnixNano", "0")),
+                        "tags": {"service": service, "sample_count": count, **_attrs_to_dict(dp.get("attributes") or [])},
+                    })
+    return points
+
+
 async def _persist_spans(spans: List[Dict]):
     if not spans:
         return
@@ -142,6 +219,7 @@ async def _persist_spans(spans: List[Dict]):
 
     # Update service dependency edges
     edges_seen = set()
+    trace_pairs: List[Dict] = []
     for s in spans:
         if not s["parent_span_id"]:
             continue
@@ -160,6 +238,7 @@ async def _persist_spans(spans: List[Dict]):
         if edge_key in edges_seen:
             continue
         edges_seen.add(edge_key)
+        trace_pairs.append({"service": s["service"], "parent_service": parent["service"]})
         await db.service_dependencies.update_one(
             {"service": parent["service"], "depends_on": s["service"]},
             {"$set": {"last_seen": datetime.now(timezone.utc).isoformat()},
@@ -167,6 +246,17 @@ async def _persist_spans(spans: List[Dict]):
              "$inc": {"call_count": 1, "error_count": 1 if s["status"] == "ERROR" else 0}},
             upsert=True,
         )
+
+    # Feed the same real parent/child relationships into topology_nodes/topology_edges —
+    # this is the collection smart_correlation_engine.py and ai_correlation.py actually read
+    # for topology-aware alert correlation. It was previously only ever populated by manual
+    # API calls or demo seed data, never by real trace data, so that correlation signal was
+    # always empty in practice.
+    if trace_pairs:
+        try:
+            await topology_service.auto_discover_from_traces(trace_pairs)
+        except Exception as e:
+            logger.warning(f"Topology auto-discovery from traces failed (non-fatal): {e}")
 
 
 # ─────────────────────────────────────────────────────
@@ -196,20 +286,19 @@ async def otlp_traces(request: Request):
 
 @otlp_router.post("/metrics")
 async def otlp_metrics(request: Request):
-    """Accept OTLP/HTTP metrics. Counts only — full metric storage is via existing monitoring layer."""
+    """Accept OTLP/HTTP metrics (gauge/sum/histogram/summary) and store real datapoint
+    values into the same metrics_timeseries store the anomaly-detection engine reads —
+    so metrics collected by real OTel exporters (including OneAgent) actually flow into
+    real anomaly detection, not just a discarded counter."""
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(400, "Invalid JSON body")
-    metric_count = 0
-    for resource_metric in body.get("resourceMetrics", []):
-        for scope_metric in resource_metric.get("scopeMetrics", []):
-            metric_count += len(scope_metric.get("metrics", []))
-    await db.otel_metric_counters.insert_one({
-        "received_at": datetime.now(timezone.utc).isoformat(),
-        "count": metric_count,
-    })
-    return {"accepted": metric_count}
+
+    points = _normalize_metric_points(body)
+    if points:
+        await metrics_timeseries_service.ingest_batch(points)
+    return {"accepted": len(points)}
 
 
 @otlp_router.post("/logs")

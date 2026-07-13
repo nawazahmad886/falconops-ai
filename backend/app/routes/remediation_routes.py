@@ -1,5 +1,9 @@
 """
 FalconOps AI - Auto-Remediation Routes
+
+/execute is a DRY-RUN / PLAN-PREVIEW ONLY endpoint — it resolves and records the
+command that would run but never executes anything against real infrastructure.
+See app.services.remediation_service module docstring.
 """
 from typing import Optional
 from fastapi import APIRouter, Depends, Query
@@ -48,7 +52,7 @@ async def execute(
     req: ExecuteRequest,
     current_user: dict = Depends(require_write_access),
 ):
-    """Execute a remediation action"""
+    """Preview a remediation action (dry-run — does not execute against real infrastructure)"""
     return await execute_remediation(
         req.action_id, req.params, req.trigger, current_user.get("email", "system")
     )

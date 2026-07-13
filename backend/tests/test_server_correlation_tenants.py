@@ -193,49 +193,49 @@ class TestAICorrelationEngine:
             pytest.skip("Authentication failed")
     
     def test_correlation_rules(self):
-        """Test GET /api/correlation/rules - Get all correlation rules"""
+        """Test GET /api/correlation/rules - Get real correlation strategies
+
+        This engine was rewritten from a fixed 7-rule template table to real
+        multi-signal grouping (topology dependency, metric pattern, severity
+        cascade, host, service) computed from live data — so this now checks
+        the 5 real strategy descriptors instead of the old fake rule names.
+        """
         response = requests.get(f"{BASE_URL}/api/correlation/rules", headers=self.headers)
         assert response.status_code == 200
         rules = response.json()
-        
+
         assert isinstance(rules, list)
-        assert len(rules) == 7  # 7 predefined rules
-        
-        # Verify rule structure
+        assert len(rules) == 5  # 5 real correlation strategies
+
         rule_names = [r["name"] for r in rules]
-        assert "Resource Saturation" in rule_names
-        assert "Database Connection Pool Exhaustion" in rule_names
-        assert "Network Connectivity Issues" in rule_names
-        assert "Disk Space Critical" in rule_names
-        assert "SSL Certificate Expiry" in rule_names
-        assert "Application Error Spike" in rule_names
-        assert "Cascading Failure" in rule_names
-        
+        assert "Topology Dependency" in rule_names
+        assert "Metric Pattern Fleet-Wide" in rule_names
+        assert "Severity Cascade" in rule_names
+        assert "Same Host" in rule_names
+        assert "Same Service" in rule_names
+
         # Verify rule has required fields
         rule = rules[0]
         assert "id" in rule
         assert "name" in rule
         assert "description" in rule
-        assert "conditions" in rule
-        assert "root_cause" in rule
-        assert "suggested_actions" in rule
         assert "severity" in rule
-        print(f"✓ Correlation Rules: {len(rules)} rules found")
-    
+        print(f"✓ Correlation Rules: {len(rules)} real strategies found")
+
     def test_correlation_stats(self):
         """Test GET /api/correlation/stats - Get correlation statistics"""
         response = requests.get(f"{BASE_URL}/api/correlation/stats", headers=self.headers)
         assert response.status_code == 200
         stats = response.json()
-        
+
         assert "total_incidents" in stats
         assert "rule_based_incidents" in stats
         assert "auto_grouped_incidents" in stats
         assert "correlation_rules_count" in stats
         assert "rules" in stats
-        
-        assert stats["correlation_rules_count"] == 7
-        print(f"✓ Correlation Stats: {stats['total_incidents']} incidents, {stats['correlation_rules_count']} rules")
+
+        assert stats["correlation_rules_count"] == 5
+        print(f"✓ Correlation Stats: {stats['total_incidents']} incidents, {stats['correlation_rules_count']} strategies")
     
     def test_correlation_run(self):
         """Test POST /api/correlation/run - Trigger correlation cycle"""

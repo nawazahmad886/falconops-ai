@@ -31,6 +31,7 @@ KAFKA_TOPICS = {
     "threats": "falconops.security.threats",
     "audit": "falconops.audit.logs",
     "alerts": "falconops.alerts.notifications",
+    "ai_monitoring": "falconops.ai.monitoring",
 }
 
 

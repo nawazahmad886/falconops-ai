@@ -174,7 +174,8 @@ class TestRemediationExecute:
         assert "action_name" in data, "Response should have action_name"
         assert "resolved_script" in data, "Response should have resolved_script"
         assert "status" in data, "Response should have status"
-        assert data["status"] == "completed", f"Expected completed, got {data['status']}"
+        # execute_remediation() is dry-run/preview only — see remediation_service docstring
+        assert data["status"] == "previewed", f"Expected previewed, got {data['status']}"
         
         # Verify resolved script contains the IP
         assert "192.168.100.200" in data["resolved_script"], "Resolved script should contain IP"
@@ -189,7 +190,7 @@ class TestRemediationExecute:
         })
         assert response.status_code == 200
         data = response.json()
-        assert data["status"] == "completed"
+        assert data["status"] == "previewed"
         assert "nginx" in data["resolved_script"]
         print(f"✓ Execute restart_service: {data['resolved_script']}")
     
@@ -254,11 +255,11 @@ class TestRemediationStats:
         response = api_client.get(f"{BASE_URL}/api/remediation/stats")
         data = response.json()
         
-        required_fields = ["total_executions", "auto_triggered", "manual_triggered", "completed"]
+        required_fields = ["total_executions", "auto_triggered", "manual_triggered", "previewed"]
         for field in required_fields:
             assert field in data, f"Stats missing field: {field}"
-        
-        print(f"✓ Stats: total={data['total_executions']}, auto={data['auto_triggered']}, manual={data['manual_triggered']}, completed={data['completed']}")
+
+        print(f"✓ Stats: total={data['total_executions']}, auto={data['auto_triggered']}, manual={data['manual_triggered']}, previewed={data['previewed']}")
 
 
 # ======================== IMPACT ANALYSIS TESTS ========================

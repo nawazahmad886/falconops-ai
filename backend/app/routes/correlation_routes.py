@@ -1,5 +1,10 @@
 """
-FalconOps AI - Alert Correlation Routes
+FalconOps AI - NLP Alert Correlation Routes
+
+Mounted at /api/correlation/nlp (not /api/correlation) because that prefix is already
+used by app.routes.correlation for the topology/rule-based correlation engine — sharing
+it previously caused GET /api/correlation/stats to silently shadow this router's real
+NLP-similarity stats with the other engine's response.
 """
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -11,7 +16,7 @@ from ..services.alert_correlation_service import (
     get_correlation_config, update_correlation_config,
 )
 
-router = APIRouter(prefix="/api/correlation", tags=["Alert Correlation"])
+router = APIRouter(prefix="/api/correlation/nlp", tags=["Alert Correlation (NLP)"])
 
 
 class UpdateConfigRequest(BaseModel):

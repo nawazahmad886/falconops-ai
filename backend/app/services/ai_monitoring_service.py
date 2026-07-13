@@ -958,6 +958,26 @@ async def evaluate_exchange(
     except Exception as e:
         logger.debug("live broadcast skipped: %s", e)
 
+    # ─── Publish to the real event bus (Kafka if connected, MongoDB fallback
+    # otherwise) — kafka_consumers.py's handler fans this out to the SOC live feed
+    # and a durable event_log record. Same compact shape as the WebSocket broadcast
+    # above (not the full raw event) to keep the event bus payload small. ───
+    try:
+        from .kafka_pipeline import producer
+        await producer.send("ai_monitoring", {
+            "id": event["id"],
+            "received_at": event["received_at"],
+            "source": event.get("source"),
+            "model": event.get("model"),
+            "verdict": verdict,
+            "agents": [
+                {"agent": a.get("agent"), "severity": a.get("severity"),
+                 "flagged": _is_flagged(a)} for a in agent_outputs
+            ],
+        })
+    except Exception as e:
+        logger.debug("ai_monitoring event publish skipped: %s", e)
+
     return event
 
 

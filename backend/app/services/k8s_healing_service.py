@@ -1,6 +1,11 @@
 """
 FalconOps AI - Kubernetes Auto-Healing Service
-Generates K8s remediation commands, approval workflows, execution logging
+Generates K8s remediation commands, approval workflows, execution logging.
+
+IMPORTANT: this is DRY-RUN / PLAN-PREVIEW ONLY. There is no Kubernetes client or
+subprocess call anywhere in this module — auto-approved playbooks are marked
+status="previewed" (not "executed") and every execution_log step is explicitly
+tagged "[Simulated]" / "simulated_success". Nothing here ever touches a real cluster.
 """
 import uuid
 import logging
@@ -124,6 +129,7 @@ async def create_execution(playbook_id: str, params: Dict, requested_by: str, au
         "commands": gen["commands"],
         "params": params,
         "requested_by": requested_by,
+        "execution_mode": "dry_run",
         "status": "approved" if (pb["auto_approve"] or auto_approved) else "pending_approval",
         "approved_by": "auto" if pb["auto_approve"] else None,
         "execution_log": [],
@@ -132,12 +138,12 @@ async def create_execution(playbook_id: str, params: Dict, requested_by: str, au
         "completed_at": None,
     }
 
-    # Simulate execution for auto-approved low-risk actions
+    # Preview (dry-run) for auto-approved low-risk actions — never actually run
     if doc["status"] == "approved":
-        doc["status"] = "executed"
+        doc["status"] = "previewed"
         doc["executed_at"] = datetime.now(timezone.utc).isoformat()
         doc["execution_log"] = [
-            {"step": i + 1, "command": cmd, "status": "simulated_success", "output": "[Simulated] Command executed successfully"}
+            {"step": i + 1, "command": cmd, "status": "simulated_success", "output": "[Simulated — NOT run against a real cluster] Command preview only"}
             for i, cmd in enumerate(gen["commands"])
         ]
         doc["completed_at"] = datetime.now(timezone.utc).isoformat()
@@ -155,18 +161,18 @@ async def approve_execution(execution_id: str, approved_by: str) -> Dict:
         return {"error": f"Cannot approve: status is {ex['status']}"}
 
     log = [
-        {"step": i + 1, "command": cmd, "status": "simulated_success", "output": "[Simulated] Command executed"}
+        {"step": i + 1, "command": cmd, "status": "simulated_success", "output": "[Simulated — NOT run against a real cluster] Command preview only"}
         for i, cmd in enumerate(ex.get("commands", []))
     ]
 
     await db.k8s_executions.update_one({"id": execution_id}, {"$set": {
-        "status": "executed",
+        "status": "previewed",
         "approved_by": approved_by,
         "executed_at": datetime.now(timezone.utc).isoformat(),
         "execution_log": log,
         "completed_at": datetime.now(timezone.utc).isoformat(),
     }})
-    return {"id": execution_id, "status": "executed"}
+    return {"id": execution_id, "status": "previewed"}
 
 
 async def reject_execution(execution_id: str, rejected_by: str) -> Dict:
@@ -186,6 +192,12 @@ async def get_executions(status: str = None, limit: int = 30) -> List[Dict]:
 async def get_k8s_stats() -> Dict:
     total = await db.k8s_executions.count_documents({})
     pending = await db.k8s_executions.count_documents({"status": "pending_approval"})
-    executed = await db.k8s_executions.count_documents({"status": "executed"})
+    previewed = await db.k8s_executions.count_documents({"status": "previewed"})
     rejected = await db.k8s_executions.count_documents({"status": "rejected"})
-    return {"total": total, "pending_approval": pending, "executed": executed, "rejected": rejected}
+    return {
+        "total": total,
+        "pending_approval": pending,
+        "previewed": previewed,
+        "rejected": rejected,
+        "execution_mode": "dry_run",
+    }
