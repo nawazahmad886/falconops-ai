@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from ..utils.auth import require_auth, require_write_access
 from ..services.incident_engine import incident_engine
 from ..services.rca_engine import rca_engine
+from ..services import autonomous_ops_orchestrator
 
 router = APIRouter(prefix="/api/incident-engine", tags=["Incident Engine"])
 
@@ -236,3 +237,28 @@ async def analyze_incident_rca(
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@router.get("/{incident_id}/recommendation")
+async def get_recommendation(
+    incident_id: str,
+    current_user: dict = Depends(require_auth)
+):
+    """
+    Get the autonomous investigate-and-recommend result for an incident (root cause,
+    confidence, evidence, agent narratives, suggested actions). Real incidents created
+    via correlation (ai_correlation.py / smart_correlation_engine.py) or a critical
+    alert already trigger this automatically; this also supports manually re-running
+    it on demand for any incident.
+    """
+    recommendation = await autonomous_ops_orchestrator.get_recommendation(incident_id)
+    if not recommendation:
+        incident = await incident_engine.get_incident(incident_id)
+        if not incident:
+            raise HTTPException(status_code=404, detail="Incident not found")
+        recommendation = await autonomous_ops_orchestrator.investigate_and_recommend(
+            incident_id, incident, tenant_id=current_user.get("tenant_id")
+        )
+        if not recommendation:
+            raise HTTPException(status_code=502, detail="Recommendation generation failed")
+    return recommendation

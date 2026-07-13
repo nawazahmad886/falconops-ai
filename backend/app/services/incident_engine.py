@@ -325,7 +325,17 @@ class IncidentEngine:
                         }
                     }
                 )
-            
+                # Autonomous validation — fire-and-forget, must never affect the status
+                # update itself. Re-checks the original triggering signal after a delay
+                # and reopens + escalates if the "resolved" status doesn't actually hold.
+                if user != "system:autonomous_validator":
+                    try:
+                        import asyncio
+                        from . import autonomous_ops_orchestrator as orchestrator
+                        asyncio.create_task(orchestrator.validate_resolution(incident_id))
+                    except Exception:
+                        pass
+
             return {k: v for k, v in result.items() if k != "_id"}
         return None
     

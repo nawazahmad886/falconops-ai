@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
@@ -6,7 +7,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '../components/ui/tabs';
 import {
     AlertTriangle, Clock, CheckCircle2, RefreshCw, ChevronDown, ChevronRight,
-    Shield, Zap, Users, Server, Activity, Brain, Target, ArrowRight
+    Shield, Zap, Users, Server, Activity, Brain, Target, ArrowRight, Sparkles
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { toast } from 'sonner';
@@ -175,14 +176,113 @@ export const IncidentEnginePage = () => {
                 <TabsContent value="active" className="mt-4">
                     <IncidentList incidents={incidents} loading={loading} expandedId={expandedId}
                         setExpandedId={setExpandedId} onUpdateStatus={updateStatus}
-                        onRunRCA={runRCA} rcaLoading={rcaLoading} />
+                        onRunRCA={runRCA} rcaLoading={rcaLoading} token={token} />
                 </TabsContent>
                 <TabsContent value="all" className="mt-4">
                     <IncidentList incidents={incidents} loading={loading} expandedId={expandedId}
                         setExpandedId={setExpandedId} onUpdateStatus={updateStatus}
-                        onRunRCA={runRCA} rcaLoading={rcaLoading} />
+                        onRunRCA={runRCA} rcaLoading={rcaLoading} token={token} />
                 </TabsContent>
             </Tabs>
+        </div>
+    );
+};
+
+const AGENT_LABELS = { rca: 'RCA Agent', summarizer: 'Summarizer', healer: 'Auto-Healing Agent' };
+
+const AIRecommendationCard = ({ incidentId, token }) => {
+    const [rec, setRec] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoading(true);
+        setError(false);
+        fetch(`${API_URL}/api/incident-engine/${incidentId}/recommendation`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        })
+            .then(res => res.ok ? res.json() : Promise.reject(res))
+            .then(data => { if (!cancelled) setRec(data); })
+            .catch(() => { if (!cancelled) setError(true); })
+            .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
+    }, [incidentId, token]);
+
+    if (loading) {
+        return (
+            <div className="bg-[#121212] border border-purple-500/20 rounded-lg p-3 flex items-center gap-2 text-xs text-[#A3A3A3]">
+                <RefreshCw className="h-3 w-3 animate-spin" /> Loading autonomous recommendation...
+            </div>
+        );
+    }
+    if (error || !rec) {
+        return (
+            <div className="bg-[#121212] border border-[#1F1F1F] rounded-lg p-3 text-xs text-[#525252]">
+                No autonomous recommendation available for this incident yet.
+            </div>
+        );
+    }
+
+    const actions = rec.suggested_actions || [];
+
+    return (
+        <div className="bg-[#121212] border border-purple-500/20 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+                <p className="text-xs text-purple-400 font-[Barlow_Condensed] uppercase tracking-wider flex items-center gap-1">
+                    <Sparkles className="h-3 w-3" /> Autonomous AI Recommendation
+                </p>
+                <Badge className="text-[9px] bg-purple-500/10 text-purple-300 border border-purple-500/30">
+                    confidence {Math.round((rec.confidence || 0) * 100)}%
+                </Badge>
+            </div>
+
+            {rec.root_cause_summary && (
+                <p className="text-sm text-white">{rec.root_cause_summary}</p>
+            )}
+
+            {Object.keys(rec.agent_narratives || {}).length > 0 && (
+                <div className="space-y-1">
+                    {Object.entries(rec.agent_narratives).map(([agentId, text]) => (
+                        <p key={agentId} className="text-xs text-[#A3A3A3]">
+                            <span className="text-white/70 font-medium">{AGENT_LABELS[agentId] || agentId}:</span> {String(text).slice(0, 300)}
+                        </p>
+                    ))}
+                </div>
+            )}
+
+            {actions.length > 0 && (
+                <div>
+                    <p className="text-xs text-[#A3A3A3] mb-1">Suggested actions (review required — nothing auto-executes):</p>
+                    <div className="space-y-1">
+                        {actions.map((a, i) => (
+                            <div key={i} className="flex items-center justify-between bg-[#0A0A0A] rounded p-2">
+                                <div className="text-xs text-white/80">
+                                    {a.name} <span className="text-[#525252]">({a.risk_level} risk)</span>
+                                </div>
+                                <Link to="/remediation">
+                                    <Button size="sm" variant="outline" className="text-[10px] h-6 border-purple-500/30 text-purple-300 hover:bg-purple-500/10">
+                                        Review in Remediation
+                                    </Button>
+                                </Link>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {rec.k8s_suggestion?.commands && (
+                <div className="flex items-center justify-between bg-[#0A0A0A] rounded p-2">
+                    <div className="text-xs text-white/80">
+                        K8s playbook: {rec.k8s_suggestion.playbook_name} <span className="text-[#525252]">({rec.k8s_suggestion.risk_level} risk)</span>
+                    </div>
+                    <Link to="/k8s-healing">
+                        <Button size="sm" variant="outline" className="text-[10px] h-6 border-cyan-500/30 text-cyan-300 hover:bg-cyan-500/10">
+                            Review in K8s Healing
+                        </Button>
+                    </Link>
+                </div>
+            )}
         </div>
     );
 };
@@ -204,7 +304,7 @@ const StatCard = ({ label, value, icon: Icon, color, subtext }) => (
     </Card>
 );
 
-const IncidentList = ({ incidents, loading, expandedId, setExpandedId, onUpdateStatus, onRunRCA, rcaLoading }) => {
+const IncidentList = ({ incidents, loading, expandedId, setExpandedId, onUpdateStatus, onRunRCA, rcaLoading, token }) => {
     if (loading) return (
         <div className="flex items-center justify-center py-12">
             <RefreshCw className="h-6 w-6 text-[#A3A3A3] animate-spin" />
@@ -282,6 +382,9 @@ const IncidentList = ({ incidents, loading, expandedId, setExpandedId, onUpdateS
                             {isExpanded && (
                                 <div className="border-t border-[#1F1F1F] p-4 space-y-4">
                                     <p className="text-sm text-[#A3A3A3]">{incident.description}</p>
+
+                                    {/* Autonomous AI Recommendation */}
+                                    <AIRecommendationCard incidentId={incident.id} token={token} />
 
                                     {/* Root Cause */}
                                     {incident.root_cause && (

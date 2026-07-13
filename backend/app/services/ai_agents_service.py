@@ -181,6 +181,21 @@ async def run_agent(agent_id: str, data: Dict, session_id: str = None, use_memor
                 memory_context += f"Analysis: {si.get('analysis_summary', '')}\n"
             memory_context += "\n--- Use these past incidents to improve your analysis. Note patterns and recurring issues. ---\n"
 
+        # Real outcome memory: not just what was said before, but whether the action
+        # taken actually worked. This is what closes the "continuously learn from
+        # previous incidents" loop — recall_similar() above only recalls past
+        # narratives, this recalls verified effectiveness.
+        similar_outcomes = await recall_similar_outcomes(data, limit=3)
+        if similar_outcomes:
+            memory_context += "\n\n--- PAST OUTCOMES (verified effectiveness) ---\n"
+            for so in similar_outcomes:
+                status = ("WORKED" if so["was_effective"] is True
+                          else "DID NOT WORK" if so["was_effective"] is False
+                          else "outcome unknown")
+                mttr_note = f", resolved in {int(so['mttr_seconds'])}s" if so.get("mttr_seconds") else ""
+                memory_context += f"\n[similarity {so['similarity']}%] Action: {so.get('action_taken') or 'n/a'} -> {status}{mttr_note}"
+            memory_context += "\n--- Prefer actions that worked before for similar incidents; avoid ones that didn't. ---\n"
+
     prompt = base_prompt + memory_context
     sid = session_id or f"agent-{agent_id}-{uuid.uuid4().hex[:8]}"
 
@@ -311,6 +326,36 @@ async def recall_similar(data: Dict, agent_id: str = None, limit: int = 3, min_s
                 "input_summary": p.get("input_data", "")[:200],
                 "analysis_summary": (str(p.get("analysis", ""))[:200] if p.get("analysis") else ""),
                 "timestamp": p.get("timestamp", ""),
+            })
+
+    scored.sort(key=lambda x: x["similarity"], reverse=True)
+    return scored[:limit]
+
+
+async def recall_similar_outcomes(data: Dict, limit: int = 3, min_similarity: float = 0.3) -> List[Dict]:
+    """Find past incident OUTCOMES (not just past analyses) similar to this one — i.e.
+    'last time this happened, was the action taken actually effective'. Written by
+    autonomous_ops_orchestrator.record_outcome() into db.incident_outcomes using the
+    same fingerprint scheme as recall_similar() above, so they stay comparable."""
+    fp = _fingerprint(data)
+    past = await db.incident_outcomes.find(
+        {"fingerprint": {"$exists": True, "$ne": ""}}, {"_id": 0}
+    ).sort("recorded_at", -1).limit(200).to_list(200)
+
+    scored = []
+    for p in past:
+        past_fp = p.get("fingerprint", "")
+        if not past_fp:
+            continue
+        sim = SequenceMatcher(None, fp, past_fp).ratio()
+        if sim >= min_similarity:
+            scored.append({
+                "incident_id": p.get("incident_id"),
+                "similarity": round(sim * 100, 1),
+                "action_taken": p.get("action_taken"),
+                "was_effective": p.get("was_effective"),
+                "mttr_seconds": p.get("mttr_seconds"),
+                "recorded_at": p.get("recorded_at"),
             })
 
     scored.sort(key=lambda x: x["similarity"], reverse=True)

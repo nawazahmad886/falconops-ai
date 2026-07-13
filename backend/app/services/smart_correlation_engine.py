@@ -3,6 +3,7 @@ FalconOps AI - Smart Correlation Engine
 Topology-aware, multi-signal event correlation for intelligent incident creation
 """
 import uuid
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from collections import defaultdict
@@ -110,6 +111,16 @@ class SmartCorrelationEngine:
 
             clean = {k: v for k, v in incident_doc.items() if k != "_id"}
             created.append(clean)
+
+            # Autonomous investigation — fire-and-forget, must never affect incident
+            # creation. This incident is a real db.incidents_engine record, so the
+            # orchestrator's later validate/escalate/learn steps (wired to
+            # incident_engine.py's resolve path) apply to it too.
+            try:
+                from . import autonomous_ops_orchestrator as orchestrator
+                asyncio.create_task(orchestrator.investigate_and_recommend(incident_id, highest, tenant_id=tenant_id))
+            except Exception:
+                pass
             details.append({"type": group["type"], "reason": group["reason"], "alerts": len(alert_ids), "confidence": group.get("confidence", 0.7)})
 
         return {

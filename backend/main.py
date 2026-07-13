@@ -36,17 +36,23 @@ from app.services.metrics_timeseries_service import metrics_timeseries_service
 from app.services import kafka_pipeline
 from app.services import kafka_consumers
 
+# Import autonomous ops orchestrator (SLA-breach escalation scheduler)
+from app.services import autonomous_ops_orchestrator
+
 # Background task for metrics processor
 metrics_processor_task = None
 
 # Background task for the Kafka/event-bus consumer
 kafka_consumer_task = None
 
+# Background task for the SLA-breach escalation scheduler
+sla_breach_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
-    global metrics_processor_task, kafka_consumer_task
+    global metrics_processor_task, kafka_consumer_task, sla_breach_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -102,6 +108,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Event bus init warning: {e}")
 
+    # Autonomous ops: SLA-breach escalation scheduler. incidents_engine already computes
+    # sla_breach_at/is_sla_breached at creation time but nothing previously read or acted
+    # on them — this is what makes that real.
+    try:
+        sla_breach_task = asyncio.create_task(autonomous_ops_orchestrator.sla_breach_scheduler())
+        logger.info("SLA-breach escalation scheduler started")
+    except Exception as e:
+        logger.warning(f"SLA-breach scheduler init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
     
     # Start uptime monitor scheduler
@@ -139,6 +154,14 @@ async def lifespan(app: FastAPI):
         await kafka_pipeline.producer.close()
     except Exception:
         pass
+
+    # Stop SLA-breach escalation scheduler
+    if sla_breach_task:
+        sla_breach_task.cancel()
+        try:
+            await sla_breach_task
+        except asyncio.CancelledError:
+            pass
 
     stop_monitoring_scheduler()
     stop_uptime_scheduler()

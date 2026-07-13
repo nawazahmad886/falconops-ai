@@ -5,6 +5,7 @@ cross-host metric patterns, severity cascades, host grouping, and service groupi
 all computed from live db.alerts / db.topology_nodes / db.topology_edges data.
 """
 import uuid
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional
@@ -347,6 +348,17 @@ async def _create_incident_from_group(
         "type": "new_incident",
         "data": {k: v for k, v in incident.items() if k != "_id"}
     })
+
+    # Autonomous investigation — fire-and-forget, must never affect incident creation.
+    # Note: this incident lives in db.incidents (the legacy system), not
+    # db.incidents_engine, so only the recommendation half of the orchestrator applies
+    # here (its validate/escalate/learn steps are wired to the incident_engine.py
+    # resolve path specifically — see autonomous_ops_orchestrator.py's module docstring).
+    try:
+        from . import autonomous_ops_orchestrator as orchestrator
+        asyncio.create_task(orchestrator.investigate_and_recommend(incident_id, top_alert, tenant_id=tenant_id))
+    except Exception:
+        pass
 
     logger.info(
         f"Created incident {incident_id} via '{group_type}' correlation with "

@@ -3,10 +3,31 @@ FalconOps AI - Enterprise Alert Engine
 Alert lifecycle management with severity levels and state transitions
 """
 import uuid
+import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from ..core.database import db
+
+
+async def _auto_investigate(alert: Dict):
+    """Best-effort autonomous investigation hand-off for a critical/high alert — wraps
+    it in its own incident (reusing IncidentEngine.create_incident_from_alerts) and
+    hands off to the orchestrator. Never allowed to affect alert creation itself."""
+    try:
+        from .incident_engine import incident_engine
+        from . import autonomous_ops_orchestrator as orchestrator
+        incident = await incident_engine.create_incident_from_alerts(
+            alert_ids=[alert["id"]],
+            correlation_reason="auto_critical_alert",
+            tenant_id=alert.get("tenant_id"),
+            created_by="system:autonomous_ops",
+        )
+        await orchestrator.investigate_and_recommend(
+            incident["id"], alert, tenant_id=alert.get("tenant_id")
+        )
+    except Exception:
+        pass
 
 
 class AlertStatus(str, Enum):
@@ -124,6 +145,13 @@ class AlertEngine:
             await producer.send("alerts", clean_alert)
         except Exception:
             pass
+
+        # Autonomous investigation for high-severity standalone alerts: wrap it in its
+        # own incident and hand off to the orchestrator (fire-and-forget — must never
+        # block or fail alert creation itself). Lower-severity alerts are left for the
+        # normal correlation engines to group before investigating.
+        if severity in ("critical", "high"):
+            asyncio.create_task(_auto_investigate(clean_alert))
 
         return clean_alert
     
