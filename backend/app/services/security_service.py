@@ -4,6 +4,7 @@ Real-time security event processing, threat detection, and user behavior analysi
 """
 import re
 import uuid
+import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
@@ -469,6 +470,13 @@ class ThreatDetectionEngine:
                 await producer.send("threats", {k: v for k, v in threat.items() if k != "_id"})
             except Exception as e:
                 logger.warning(f"Threat event publish skipped: {e}")
+            # 'AI anomaly trigger' workflows — best-effort, never allowed to affect
+            # threat storage itself.
+            try:
+                from . import workflow_trigger_service
+                asyncio.create_task(workflow_trigger_service.evaluate_anomaly_triggers(threat))
+            except Exception as e:
+                logger.warning(f"Anomaly trigger evaluation skipped: {e}")
         except Exception as e:
             logger.error(f"Failed to store threat: {e}")
 

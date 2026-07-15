@@ -10,6 +10,17 @@ from enum import Enum
 from ..core.database import db
 
 
+async def _evaluate_workflow_triggers(alert: Dict):
+    """Best-effort 'problem trigger' workflow evaluation — fires any workflow whose
+    trigger.problem_filter matches this alert. Never allowed to affect alert creation
+    itself, same as _auto_investigate below."""
+    try:
+        from . import workflow_trigger_service
+        await workflow_trigger_service.evaluate_problem_triggers(alert)
+    except Exception:
+        pass
+
+
 async def _auto_investigate(alert: Dict):
     """Best-effort autonomous investigation hand-off for a critical/high alert — wraps
     it in its own incident (reusing IncidentEngine.create_incident_from_alerts) and
@@ -145,6 +156,10 @@ class AlertEngine:
             await producer.send("alerts", clean_alert)
         except Exception:
             pass
+
+        # Problem-trigger workflows: evaluated for every alert regardless of severity —
+        # each workflow's own trigger.problem_filter decides whether it's a match.
+        asyncio.create_task(_evaluate_workflow_triggers(clean_alert))
 
         # Autonomous investigation for high-severity standalone alerts: wrap it in its
         # own incident and hand off to the orchestrator (fire-and-forget — must never

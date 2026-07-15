@@ -46,6 +46,11 @@ from app.services import vulnerability_service
 from app.services import compliance_service
 from app.services import soc_ingestion_service
 
+# Import the workflow trigger service (closes the previously-dead cron-schedule gap —
+# runbook.schedule.next_run was computed and stored but nothing polled for due
+# runbooks automatically until now)
+from app.services import workflow_trigger_service
+
 # Background task for metrics processor
 metrics_processor_task = None
 
@@ -61,12 +66,16 @@ vuln_sync_task = None
 compliance_snapshot_task = None
 generic_ingestion_task = None
 
+# Background task for the workflow builder's schedule-trigger executor
+runbook_schedule_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager"""
     global metrics_processor_task, kafka_consumer_task, sla_breach_task
     global threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task
+    global runbook_schedule_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -143,6 +152,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"AI-SOC scheduler init warning: {e}")
 
+    # Workflow builder: schedule-trigger executor. Fixes a real pre-existing gap —
+    # runbook.schedule.next_run was computed and stored by the manual
+    # POST /runbooks/scheduled/execute endpoint, but nothing called it on a timer.
+    try:
+        runbook_schedule_task = asyncio.create_task(workflow_trigger_service.runbook_schedule_scheduler())
+        logger.info("Runbook schedule-trigger scheduler started")
+    except Exception as e:
+        logger.warning(f"Runbook schedule scheduler init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
     
     # Start uptime monitor scheduler
@@ -197,6 +215,14 @@ async def lifespan(app: FastAPI):
                 await task
             except asyncio.CancelledError:
                 pass
+
+    # Stop the runbook schedule-trigger scheduler
+    if runbook_schedule_task:
+        runbook_schedule_task.cancel()
+        try:
+            await runbook_schedule_task
+        except asyncio.CancelledError:
+            pass
 
     stop_monitoring_scheduler()
     stop_uptime_scheduler()

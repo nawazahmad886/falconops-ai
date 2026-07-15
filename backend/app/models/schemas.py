@@ -116,6 +116,7 @@ class RunbookResponse(BaseModel):
     schedule: Optional[Dict[str, Any]] = None
     tags: Optional[List[str]] = []
     tenant_id: Optional[str] = None
+    trigger: Optional[Dict[str, Any]] = None
 
 
 # ======================== ANALYTICS MODELS ========================

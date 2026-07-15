@@ -69,8 +69,13 @@ import {
     Save,
     Monitor,
     Wand2,
+    Bot,
+    LayoutGrid,
+    Sparkles,
 } from 'lucide-react';
 import { VisualWorkflowBuilder } from '../components/VisualWorkflowBuilder';
+import { WorkflowCanvas } from '../components/WorkflowCanvas';
+import { WorkflowTemplateGallery } from '../components/WorkflowTemplateGallery';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
 
@@ -104,6 +109,7 @@ const categoryIcons = {
     security: Shield,
     database: Database,
     network: Network,
+    agent: Bot,
     general: Folder,
 };
 
@@ -116,6 +122,9 @@ export const RunbooksPage = () => {
     const [stats, setStats] = useState(null);
     const [scheduledRunbooks, setScheduledRunbooks] = useState([]);
     const [schedulePresets, setSchedulePresets] = useState([]);
+    const [agentCatalog, setAgentCatalog] = useState([]);
+    const [triggerTypes, setTriggerTypes] = useState([]);
+    const [galleryOpen, setGalleryOpen] = useState(false);
     const [loading, setLoading] = useState(true);
     const [activeTab, setActiveTab] = useState('runbooks');
     const [dialogOpen, setDialogOpen] = useState(false);
@@ -129,7 +138,7 @@ export const RunbooksPage = () => {
     // Edit mode states
     const [editDialogOpen, setEditDialogOpen] = useState(false);
     const [editingRunbook, setEditingRunbook] = useState(null);
-    const [useVisualBuilder, setUseVisualBuilder] = useState(true);
+    const [builderMode, setBuilderMode] = useState('canvas'); // 'canvas' | 'visual' | 'json'
     const [scheduleForm, setScheduleForm] = useState({
         enabled: true,
         cron_expression: '0 * * * *',
@@ -149,7 +158,7 @@ export const RunbooksPage = () => {
     const fetchRunbooks = async () => {
         setLoading(true);
         try {
-            const [runbooksRes, templatesRes, categoriesRes, actionTypesRes, statsRes, scheduledRes, presetsRes] = await Promise.all([
+            const [runbooksRes, templatesRes, categoriesRes, actionTypesRes, statsRes, scheduledRes, presetsRes, agentCatalogRes, triggerTypesRes] = await Promise.all([
                 api.get('/runbooks'),
                 api.get('/runbooks/templates'),
                 api.get('/runbooks/categories'),
@@ -157,6 +166,8 @@ export const RunbooksPage = () => {
                 api.get('/runbooks/stats/summary'),
                 api.get('/runbooks/scheduled').catch(() => ({ data: { scheduled_runbooks: [] } })),
                 api.get('/runbooks/schedules/presets').catch(() => ({ data: { presets: [] } })),
+                api.get('/runbooks/agent-catalog').catch(() => ({ data: { agents: [] } })),
+                api.get('/runbooks/trigger-types').catch(() => ({ data: { trigger_types: [] } })),
             ]);
             setRunbooks(runbooksRes.data);
             setTemplates(templatesRes.data.templates || []);
@@ -165,6 +176,8 @@ export const RunbooksPage = () => {
             setStats(statsRes.data);
             setScheduledRunbooks(scheduledRes.data.scheduled_runbooks || []);
             setSchedulePresets(presetsRes.data.presets || []);
+            setAgentCatalog(agentCatalogRes.data.agents || []);
+            setTriggerTypes(triggerTypesRes.data.trigger_types || []);
         } catch (error) {
             toast.error('Failed to fetch runbooks data');
         } finally {
@@ -254,7 +267,8 @@ export const RunbooksPage = () => {
     const handleEditRunbook = async (runbook) => {
         setEditingRunbook({
             ...runbook,
-            steps: runbook.steps || []
+            steps: runbook.steps || [],
+            trigger: runbook.trigger || { type: 'on_demand' },
         });
         setEditDialogOpen(true);
     };
@@ -272,6 +286,7 @@ export const RunbooksPage = () => {
                 auto_execute: editingRunbook.auto_execute,
                 tags: editingRunbook.tags || [],
                 steps: editingRunbook.steps.filter(s => s.action_type),
+                trigger: editingRunbook.trigger || { type: 'on_demand' },
             });
             toast.success('Runbook updated successfully');
             setEditDialogOpen(false);
@@ -484,6 +499,10 @@ export const RunbooksPage = () => {
                         <Button onClick={fetchRunbooks} variant="outline" size="sm">
                             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
                             Refresh
+                        </Button>
+                        <Button onClick={() => setGalleryOpen(true)} variant="outline" size="sm" data-testid="browse-templates-btn">
+                            <Sparkles className="w-4 h-4 mr-2" />
+                            Create from Template
                         </Button>
                         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
                             <DialogTrigger asChild>
@@ -1173,24 +1192,36 @@ export const RunbooksPage = () => {
                                     />
                                 </div>
 
-                                {/* Toggle between Visual Builder and JSON */}
+                                {/* Toggle between Workflow Canvas / Visual Builder / JSON */}
                                 <div className="flex items-center justify-between border-t border-white/10 pt-4">
                                     <h3 className="text-lg font-semibold">Automation Steps</h3>
                                     <div className="flex items-center gap-2">
                                         <Button
                                             type="button"
-                                            variant={useVisualBuilder ? "default" : "outline"}
+                                            variant={builderMode === 'canvas' ? "default" : "outline"}
                                             size="sm"
-                                            onClick={() => setUseVisualBuilder(true)}
+                                            onClick={() => setBuilderMode('canvas')}
+                                            data-testid="builder-mode-canvas"
+                                        >
+                                            <LayoutGrid className="w-4 h-4 mr-1" />
+                                            Workflow Canvas
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            variant={builderMode === 'visual' ? "default" : "outline"}
+                                            size="sm"
+                                            onClick={() => setBuilderMode('visual')}
+                                            data-testid="builder-mode-visual"
                                         >
                                             <Wand2 className="w-4 h-4 mr-1" />
                                             Visual Builder
                                         </Button>
                                         <Button
                                             type="button"
-                                            variant={!useVisualBuilder ? "default" : "outline"}
+                                            variant={builderMode === 'json' ? "default" : "outline"}
                                             size="sm"
-                                            onClick={() => setUseVisualBuilder(false)}
+                                            onClick={() => setBuilderMode('json')}
+                                            data-testid="builder-mode-json"
                                         >
                                             <Code className="w-4 h-4 mr-1" />
                                             JSON
@@ -1198,11 +1229,21 @@ export const RunbooksPage = () => {
                                     </div>
                                 </div>
 
-                                {/* Visual Workflow Builder or JSON Editor */}
-                                {useVisualBuilder ? (
+                                {/* Workflow Canvas, Visual Workflow Builder, or JSON Editor */}
+                                {builderMode === 'canvas' ? (
+                                    <WorkflowCanvas
+                                        trigger={editingRunbook.trigger}
+                                        onTriggerChange={(trigger) => setEditingRunbook({ ...editingRunbook, trigger })}
+                                        steps={editingRunbook.steps}
+                                        onStepsChange={(steps) => setEditingRunbook({ ...editingRunbook, steps })}
+                                        triggerTypes={triggerTypes}
+                                        agentCatalog={agentCatalog}
+                                    />
+                                ) : builderMode === 'visual' ? (
                                     <VisualWorkflowBuilder
                                         steps={editingRunbook.steps}
                                         onChange={(steps) => setEditingRunbook({ ...editingRunbook, steps })}
+                                        agentCatalog={agentCatalog}
                                     />
                                 ) : (
                                     <div className="space-y-2">
@@ -1235,6 +1276,13 @@ export const RunbooksPage = () => {
                         )}
                     </DialogContent>
                 </Dialog>
+
+                <WorkflowTemplateGallery
+                    open={galleryOpen}
+                    onOpenChange={setGalleryOpen}
+                    templates={templates}
+                    onUseTemplate={(templateId, service) => handleCreateFromTemplate(templateId, service)}
+                />
             </div>
         </>
     );

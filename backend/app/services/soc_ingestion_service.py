@@ -49,6 +49,13 @@ async def ingest_event(raw: Dict) -> Dict:
     except Exception as e:
         logger.debug(f"Secret scan skipped: {e}")
 
+    # 'Event trigger' workflows — best-effort, never allowed to affect ingestion itself.
+    try:
+        from . import workflow_trigger_service
+        asyncio.create_task(workflow_trigger_service.evaluate_event_triggers(event))
+    except Exception as e:
+        logger.debug(f"Event trigger evaluation skipped: {e}")
+
     # Check correlation
     incident = await correlate_event(event)
 

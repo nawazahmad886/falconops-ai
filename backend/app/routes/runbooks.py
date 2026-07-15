@@ -36,6 +36,10 @@ class RunbookCreateEnhanced(BaseModel):
     auto_execute: bool = False
     schedule: Optional[dict] = None  # Cron schedule support
     tags: List[str] = []
+    # Structured trigger: {type: on_demand|problem|event|schedule|ai_anomaly, ...filter}.
+    # Additive — trigger_conditions/schedule/auto_execute above are kept for back-compat
+    # reads of runbooks created before this field existed.
+    trigger: Optional[dict] = None
 
 
 class RunbookExecuteRequest(BaseModel):
@@ -76,7 +80,13 @@ async def get_runbooks(
 @router.post("", response_model=RunbookResponse)
 async def create_runbook(runbook: RunbookCreateEnhanced, current_user: dict = Depends(require_write_access)):
     """Create a new runbook"""
+    from ..services.workflow_trigger_service import derive_legacy_schedule
+
     runbook_id = str(uuid.uuid4())
+    # A structured 'schedule' trigger drives its due-check through the same legacy
+    # schedule.{enabled,cron_expression,next_run} fields the scheduler already knows
+    # how to evaluate — derive it here unless the caller explicitly set one.
+    schedule = runbook.schedule or derive_legacy_schedule(runbook.trigger)
     runbook_doc = {
         "id": runbook_id,
         "name": runbook.name,
@@ -86,15 +96,16 @@ async def create_runbook(runbook: RunbookCreateEnhanced, current_user: dict = De
         "trigger_conditions": runbook.trigger_conditions,
         "steps": runbook.steps,
         "auto_execute": runbook.auto_execute,
-        "schedule": runbook.schedule,
+        "schedule": schedule,
         "tags": runbook.tags,
+        "trigger": runbook.trigger or {"type": "on_demand"},
         "execution_count": 0,
         "last_executed": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user["email"],
         "tenant_id": current_user.get("tenant_id")
     }
-    
+
     await db.runbooks.insert_one(runbook_doc)
     return RunbookResponse(**runbook_doc)
 
@@ -113,13 +124,16 @@ async def create_from_template(
     current_user: dict = Depends(require_write_access)
 ):
     """Create a runbook from a template"""
+    from ..services.workflow_trigger_service import derive_legacy_schedule
+
     templates = await get_runbook_templates()
     template = next((t for t in templates if t["id"] == template_id), None)
-    
+
     if not template:
         raise HTTPException(status_code=404, detail="Template not found")
-    
+
     runbook_id = str(uuid.uuid4())
+    template_trigger = template.get("trigger") or {"type": "on_demand"}
     runbook_doc = {
         "id": runbook_id,
         "name": template["name"],
@@ -129,8 +143,9 @@ async def create_from_template(
         "trigger_conditions": None,
         "steps": template["steps"],
         "auto_execute": False,
-        "schedule": None,
+        "schedule": derive_legacy_schedule(template_trigger),
         "tags": [template.get("category", "general")],
+        "trigger": template_trigger,
         "execution_count": 0,
         "last_executed": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -155,6 +170,7 @@ async def get_categories(current_user: Optional[dict] = Depends(get_current_user
             {"id": "security", "name": "Security", "icon": "shield", "description": "Security and compliance tasks"},
             {"id": "database", "name": "Database", "icon": "database", "description": "Database maintenance and operations"},
             {"id": "network", "name": "Network", "icon": "network", "description": "Network troubleshooting"},
+            {"id": "agent", "name": "AI Agent", "icon": "bot", "description": "Trigger-driven workflows that call a specialized AI agent"},
             {"id": "general", "name": "General", "icon": "folder", "description": "General purpose runbooks"}
         ]
     }
@@ -165,6 +181,57 @@ async def get_action_types_endpoint(current_user: Optional[dict] = Depends(get_c
     """Get available action types for runbook steps"""
     action_types = await get_action_types()
     return {"action_types": action_types}
+
+
+@router.get("/agent-catalog")
+async def get_agent_catalog_endpoint(current_user: Optional[dict] = Depends(get_current_user)):
+    """List every AI agent a 'call_agent' workflow step can invoke — the 5 specialized
+    security agents plus the 3 core (rca/summarizer/healer) agents. Powers the
+    workflow builder's agent-picker dropdown."""
+    from ..services.security_agents_service import get_agent_catalog
+    from ..services.ai_agents_service import AGENTS
+
+    security = [{**a, "agent_source": "security"} for a in get_agent_catalog()]
+    core = [
+        {"id": aid, "name": a["name"], "specialty": a["role"], "tools": [], "agent_source": "core"}
+        for aid, a in AGENTS.items()
+    ]
+    return {"agents": security + core}
+
+
+@router.get("/trigger-types")
+async def get_trigger_types_endpoint(current_user: Optional[dict] = Depends(get_current_user)):
+    """List the trigger types a workflow can start from, with their filter schema —
+    keeps the frontend's trigger-config panel data-driven instead of hardcoded twice."""
+    return {
+        "trigger_types": [
+            {"id": "on_demand", "name": "On-Demand", "description": "Only runs when manually executed",
+             "filter_fields": []},
+            {"id": "problem", "name": "Problem Trigger", "description": "Runs when a matching alert/problem is created",
+             "filter_fields": [
+                 {"name": "severity", "label": "Severity", "type": "multiselect",
+                  "options": ["critical", "high", "medium", "low", "info"]},
+                 {"name": "service", "label": "Service (optional)", "type": "text"},
+             ]},
+            {"id": "event", "name": "Event Trigger", "description": "Runs when a matching ingested SOC event occurs",
+             "filter_fields": [
+                 {"name": "source", "label": "Event source (optional)", "type": "text"},
+                 {"name": "keyword", "label": "Message keyword (optional)", "type": "text"},
+             ]},
+            {"id": "ai_anomaly", "name": "AI Anomaly Trigger", "description": "Runs when the real threat/anomaly engine flags a new finding",
+             "filter_fields": [
+                 {"name": "min_severity", "label": "Minimum severity", "type": "select",
+                  "options": ["low", "medium", "high", "critical"]},
+             ]},
+            {"id": "schedule", "name": "Schedule Trigger", "description": "Runs on a fixed time, interval, or cron schedule",
+             "filter_fields": [
+                 {"name": "mode", "label": "Mode", "type": "select", "options": ["cron", "interval", "fixed_time"]},
+                 {"name": "cron_expression", "label": "Cron expression", "type": "text"},
+                 {"name": "interval_minutes", "label": "Interval (minutes)", "type": "number"},
+                 {"name": "fixed_time", "label": "Fixed time (HH:MM UTC)", "type": "text"},
+             ]},
+        ]
+    }
 
 
 @router.get("/scheduled")
@@ -216,10 +283,13 @@ async def get_runbook(runbook_id: str, current_user: Optional[dict] = Depends(ge
 @router.put("/{runbook_id}", response_model=RunbookResponse)
 async def update_runbook(runbook_id: str, runbook: RunbookCreateEnhanced, current_user: dict = Depends(require_write_access)):
     """Update a runbook"""
+    from ..services.workflow_trigger_service import derive_legacy_schedule
+
     existing = await db.runbooks.find_one({"id": runbook_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Runbook not found")
-    
+
+    schedule = runbook.schedule or derive_legacy_schedule(runbook.trigger)
     update_data = {
         "name": runbook.name,
         "description": runbook.description,
@@ -228,8 +298,9 @@ async def update_runbook(runbook_id: str, runbook: RunbookCreateEnhanced, curren
         "trigger_conditions": runbook.trigger_conditions,
         "steps": runbook.steps,
         "auto_execute": runbook.auto_execute,
-        "schedule": runbook.schedule,
+        "schedule": schedule,
         "tags": runbook.tags,
+        "trigger": runbook.trigger or {"type": "on_demand"},
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     
@@ -526,48 +597,8 @@ async def execute_scheduled_runbooks(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(require_write_access)
 ):
-    """Execute all due scheduled runbooks (typically called by a cron job)"""
-    now = datetime.now(timezone.utc).isoformat()
-    
-    query = {
-        "schedule.enabled": True,
-        "schedule.next_run": {"$lte": now}
-    }
-    if current_user.get("tenant_id"):
-        query = build_tenant_query(current_user.get("tenant_id"), query)
-    
-    due_runbooks = await db.runbooks.find(query, {"_id": 0}).to_list(50)
-    
-    results = []
-    for runbook in due_runbooks:
-        # Execute in background
-        result = await runbook_engine.execute_runbook(
-            runbook_id=runbook["id"],
-            trigger_source="scheduled",
-            trigger_context={"scheduled_at": now},
-            user_email="scheduler",
-            tenant_id=runbook.get("tenant_id")
-        )
-        
-        # Update next run time
-        try:
-            from croniter import croniter
-            cron = croniter(runbook["schedule"]["cron_expression"], datetime.now(timezone.utc))
-            next_run = cron.get_next(datetime).isoformat()
-            await db.runbooks.update_one(
-                {"id": runbook["id"]},
-                {"$set": {"schedule.next_run": next_run}}
-            )
-        except:
-            pass
-        
-        results.append({
-            "runbook_id": runbook["id"],
-            "runbook_name": runbook["name"],
-            "success": result.get("success", False)
-        })
-    
-    return {
-        "executed": len(results),
-        "results": results
-    }
+    """Execute all due scheduled runbooks (typically called by a cron job — the same
+    logic also runs automatically every 60s via workflow_trigger_service.
+    runbook_schedule_scheduler, registered in main.py's lifespan)."""
+    from ..services.workflow_trigger_service import execute_due_runbooks
+    return await execute_due_runbooks(tenant_id=current_user.get("tenant_id"))

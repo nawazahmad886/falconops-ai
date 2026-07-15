@@ -49,10 +49,11 @@ import {
     X,
     Check,
     AlertCircle,
+    Bot,
 } from 'lucide-react';
 
 // Action type configurations
-const ACTION_TYPES = {
+export const ACTION_TYPES = {
     http_request: { 
         icon: Globe, 
         label: 'HTTP Request', 
@@ -165,17 +166,24 @@ const ACTION_TYPES = {
         description: 'Iterate over items',
         fields: ['items', 'max_iterations']
     },
-    parallel: { 
-        icon: Layers, 
-        label: 'Parallel', 
+    parallel: {
+        icon: Layers,
+        label: 'Parallel',
         color: 'bg-fuchsia-500',
         description: 'Execute in parallel',
         fields: ['actions']
     },
+    call_agent: {
+        icon: Bot,
+        label: 'Call AI Agent',
+        color: 'bg-purple-500',
+        description: 'Invoke a specialized AI agent and capture its findings',
+        fields: ['agent_source', 'agent_id', 'query_template']
+    },
 };
 
 // Step Configuration Panel
-const StepConfigPanel = ({ step, onChange, onClose }) => {
+export const StepConfigPanel = ({ step, onChange, onClose, agentCatalog = [] }) => {
     const actionType = ACTION_TYPES[step.action_type];
     const Icon = actionType?.icon || Terminal;
     
@@ -301,6 +309,49 @@ const StepConfigPanel = ({ step, onChange, onClose }) => {
                             <SelectItem value="python">Python</SelectItem>
                         </SelectContent>
                     </Select>
+                );
+            case 'agent_source':
+                return (
+                    <Select value={value || 'security'} onValueChange={(v) => updateConfig('agent_source', v)}>
+                        <SelectTrigger className="bg-muted/50"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                            <SelectItem value="security">Security Agent</SelectItem>
+                            <SelectItem value="core">Core Agent</SelectItem>
+                        </SelectContent>
+                    </Select>
+                );
+            case 'agent_id': {
+                const source = step.config?.agent_source || 'security';
+                const options = agentCatalog.filter(a => a.agent_source === source);
+                if (options.length === 0) {
+                    return (
+                        <Input
+                            value={value}
+                            onChange={(e) => updateConfig('agent_id', e.target.value)}
+                            className="bg-muted/50"
+                            placeholder="e.g. threat_hunting, rca..."
+                        />
+                    );
+                }
+                return (
+                    <Select value={value || ''} onValueChange={(v) => updateConfig('agent_id', v)}>
+                        <SelectTrigger className="bg-muted/50"><SelectValue placeholder="Select an agent" /></SelectTrigger>
+                        <SelectContent>
+                            {options.map(a => (
+                                <SelectItem key={a.id} value={a.id}>{a.name}</SelectItem>
+                            ))}
+                        </SelectContent>
+                    </Select>
+                );
+            }
+            case 'query_template':
+                return (
+                    <Textarea
+                        value={value}
+                        onChange={(e) => updateConfig('query_template', e.target.value)}
+                        className="bg-muted/50 text-xs min-h-[80px]"
+                        placeholder="e.g. Investigate this problem: {{title}} ({{severity}}) on {{service}}"
+                    />
                 );
             case 'body':
             case 'script':
@@ -488,7 +539,7 @@ const VisualStepCard = ({ step, index, isSelected, onSelect, onDelete, onMoveUp,
 };
 
 // Main Visual Workflow Builder
-export const VisualWorkflowBuilder = ({ steps = [], onChange, onSave }) => {
+export const VisualWorkflowBuilder = ({ steps = [], onChange, onSave, agentCatalog = [] }) => {
     const [selectedStepIndex, setSelectedStepIndex] = useState(null);
     const [showActionPicker, setShowActionPicker] = useState(false);
 
@@ -585,6 +636,7 @@ export const VisualWorkflowBuilder = ({ steps = [], onChange, onSave }) => {
                         step={steps[selectedStepIndex]}
                         onChange={(updated) => updateStep(selectedStepIndex, updated)}
                         onClose={() => setSelectedStepIndex(null)}
+                        agentCatalog={agentCatalog}
                     />
                 ) : (
                     <div className="p-8 rounded-lg bg-muted/10 border border-white/5 text-center text-muted-foreground">

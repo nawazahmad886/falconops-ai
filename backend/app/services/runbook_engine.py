@@ -35,6 +35,7 @@ class ActionType(str, Enum):
     SET_VARIABLE = "set_variable"
     LOOP = "loop"
     PARALLEL = "parallel"
+    CALL_AGENT = "call_agent"
 
 
 class RunbookEngine:
@@ -205,6 +206,8 @@ class RunbookEngine:
                 output = await self._execute_loop(step)
             elif action_type == ActionType.PARALLEL or action_type == "parallel":
                 output = await self._execute_parallel(step)
+            elif action_type == ActionType.CALL_AGENT or action_type == "call_agent":
+                output = await self._execute_call_agent(step)
             else:
                 output = {"message": f"Action type '{action_type}' executed (simulated)"}
             
@@ -653,23 +656,75 @@ class RunbookEngine:
             "success": True
         }
     
+    async def _execute_call_agent(self, step: Dict[str, Any]) -> Dict[str, Any]:
+        """Invoke a specialized AI agent and capture its findings for downstream steps
+        (e.g. a following notification step referencing {{stepN.narrative}} to
+        'annotate' the triggering problem — mirrors the trigger -> call_agent ->
+        agent_report shape from the workflow builder's canvas)."""
+        config = step.get("config", {})
+        agent_source = config.get("agent_source", "security")
+        agent_id = config.get("agent_id", "")
+        query = self._interpolate_variables(config.get("query_template", "Analyze this incident."))
+
+        if agent_source == "security":
+            from .security_agents_service import run_security_agent
+            tenant_id = self.execution_context.get("variables", {}).get("tenant_id")
+            result = await run_security_agent(agent_id, query, tenant_id=tenant_id)
+            if not result:
+                return {"agent_source": agent_source, "agent_id": agent_id, "success": False,
+                         "error": f"Unknown security agent '{agent_id}'"}
+            return {
+                "agent_source": agent_source,
+                "agent_id": agent_id,
+                "agent_name": result.get("agent_name"),
+                "narrative": result.get("summary", ""),
+                "confidence": result.get("confidence"),
+                "recommended_actions": result.get("recommended_actions", []),
+                "success": True,
+            }
+        elif agent_source == "core":
+            from .ai_agents_service import run_agent
+            result = await run_agent(agent_id, {"description": query})
+            if "error" in result:
+                return {"agent_source": agent_source, "agent_id": agent_id, "success": False,
+                         "error": result["error"]}
+            return {
+                "agent_source": agent_source,
+                "agent_id": agent_id,
+                "agent_name": result.get("agent_name"),
+                "narrative": result.get("analysis", ""),
+                "success": True,
+            }
+        else:
+            return {"agent_source": agent_source, "success": False,
+                     "error": f"Unknown agent_source '{agent_source}' (expected 'security' or 'core')"}
+
     def _interpolate_variables(self, text: str) -> str:
-        """Replace {{variable}} placeholders with actual values"""
+        """Replace {{variable}} placeholders with actual values. Supports one level of
+        dot-path access into a step's output dict (e.g. {{step_1.narrative}}) so a
+        call_agent step's findings can be referenced by a later notification/
+        log_message step — falls back to stringifying the whole value for a bare
+        {{key}} placeholder, preserving behavior for every existing template."""
         if not text or "{{" not in text:
             return text
-        
+
+        import re
         variables = self.execution_context.get("variables", {})
         step_outputs = self.execution_context.get("step_outputs", {})
-        
-        # Combine all available variables
         all_vars = {**variables, **step_outputs}
-        
-        for key, value in all_vars.items():
-            placeholder = f"{{{{{key}}}}}"
-            if placeholder in text:
-                text = text.replace(placeholder, str(value))
-        
-        return text
+
+        def _resolve(match):
+            parts = match.group(1).strip().split(".")
+            value = all_vars.get(parts[0])
+            if value is None:
+                return match.group(0)
+            for part in parts[1:]:
+                value = value.get(part) if isinstance(value, dict) else None
+                if value is None:
+                    return match.group(0)
+            return str(value)
+
+        return re.sub(r"\{\{\s*([\w.]+)\s*\}\}", _resolve, text)
 
 
 # Singleton instance
@@ -1206,6 +1261,171 @@ async def get_runbook_templates() -> List[Dict[str, Any]]:
                     }
                 }
             ]
+        },
+        # AI Agent Templates — each wires a trigger + a call_agent step to one of
+        # FalconOps' real specialized agents (security_agents_service / ai_agents_service),
+        # matching the workflow builder's trigger -> call_agent -> agent_report shape.
+        {
+            "id": "tpl-threat-triage-agent",
+            "name": "Threat Triage Agent",
+            "description": "On every critical/high problem, runs the Threat Hunting Agent and posts its findings",
+            "category": "agent",
+            "trigger": {
+                "type": "problem",
+                "problem_filter": {"severity": ["critical", "high"]}
+            },
+            "steps": [
+                {
+                    "name": "Run Threat Hunting Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "security",
+                        "agent_id": "threat_hunting",
+                        "query_template": "Investigate this problem for signs of compromise: {{title}} ({{severity}}) on {{service}}"
+                    }
+                },
+                {
+                    "name": "Post Findings",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "Threat Hunting Agent findings: {{step_1.narrative}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        {
+            "id": "tpl-vulnerability-verification-agent",
+            "name": "Vulnerability Verification Agent",
+            "description": "Daily run of the Cloud Security Agent against current vulnerability + topology data",
+            "category": "agent",
+            "trigger": {
+                "type": "schedule",
+                "schedule": {"mode": "cron", "cron_expression": "0 6 * * *"}
+            },
+            "steps": [
+                {
+                    "name": "Run Cloud Security Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "security",
+                        "agent_id": "cloud_security",
+                        "query_template": "Review current CVE exposure against our service topology and prioritize the top risks."
+                    }
+                },
+                {
+                    "name": "Post Findings",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "email",
+                        "message": "Vulnerability Verification Agent report: {{step_1.narrative}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        {
+            "id": "tpl-identity-risk-agent",
+            "name": "Identity Risk Agent",
+            "description": "On every problem, runs the Identity Security Agent to check for credential/insider-threat risk",
+            "category": "agent",
+            "trigger": {
+                "type": "problem",
+                "problem_filter": {"severity": ["critical", "high", "medium"]}
+            },
+            "steps": [
+                {
+                    "name": "Run Identity Security Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "security",
+                        "agent_id": "identity",
+                        "query_template": "Assess identity-based risk (credential compromise, privilege escalation, insider threat) related to: {{title}}"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-compliance-check-agent",
+            "name": "Compliance Check Agent",
+            "description": "Weekly run of the Compliance Agent across SOC2/ISO27001 controls",
+            "category": "agent",
+            "trigger": {
+                "type": "schedule",
+                "schedule": {"mode": "cron", "cron_expression": "0 8 * * 1"}
+            },
+            "steps": [
+                {
+                    "name": "Run Compliance Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "security",
+                        "agent_id": "compliance",
+                        "query_template": "Assess current SOC2/ISO27001 compliance posture and flag any control gaps."
+                    }
+                },
+                {
+                    "name": "Post Findings",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "email",
+                        "message": "Compliance Check Agent report: {{step_1.narrative}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
+        },
+        {
+            "id": "tpl-network-anomaly-agent",
+            "name": "Network Anomaly Agent",
+            "description": "On AI-detected anomalies, runs the Network Security Agent to investigate traffic patterns",
+            "category": "agent",
+            "trigger": {
+                "type": "ai_anomaly",
+                "anomaly_filter": {"min_severity": "medium"}
+            },
+            "steps": [
+                {
+                    "name": "Run Network Security Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "security",
+                        "agent_id": "network",
+                        "query_template": "Analyze this anomaly for network-level attack patterns: {{message}}"
+                    }
+                }
+            ]
+        },
+        {
+            "id": "tpl-incident-rca-agent",
+            "name": "Incident RCA Agent",
+            "description": "On every critical problem, runs the core RCA Agent and posts a root-cause summary",
+            "category": "agent",
+            "trigger": {
+                "type": "problem",
+                "problem_filter": {"severity": ["critical"]}
+            },
+            "steps": [
+                {
+                    "name": "Run RCA Agent",
+                    "action_type": "call_agent",
+                    "config": {
+                        "agent_source": "core",
+                        "agent_id": "rca",
+                        "query_template": "{{title}} affecting {{service}}, severity {{severity}}"
+                    }
+                },
+                {
+                    "name": "Post Findings",
+                    "action_type": "notification",
+                    "config": {
+                        "channel": "slack",
+                        "message": "RCA Agent analysis: {{step_1.narrative}}"
+                    },
+                    "continue_on_failure": True
+                }
+            ]
         }
     ]
 
@@ -1229,5 +1449,6 @@ async def get_action_types() -> List[Dict[str, Any]]:
         {"id": "script", "name": "Script", "description": "Execute Python/Bash scripts", "icon": "code"},
         {"id": "set_variable", "name": "Set Variable", "description": "Set runtime variable", "icon": "variable"},
         {"id": "loop", "name": "Loop", "description": "Iterate over items", "icon": "repeat"},
-        {"id": "parallel", "name": "Parallel", "description": "Execute actions in parallel", "icon": "layers"}
+        {"id": "parallel", "name": "Parallel", "description": "Execute actions in parallel", "icon": "layers"},
+        {"id": "call_agent", "name": "Call AI Agent", "description": "Invoke a specialized AI agent and capture its findings", "icon": "bot"}
     ]
