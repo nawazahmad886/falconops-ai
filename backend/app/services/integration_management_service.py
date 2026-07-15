@@ -250,17 +250,22 @@ async def test_integration(integration_id: str) -> Dict:
     config = cfg.get("config", {})
     try:
         import httpx
+        from .ssrf_guard import is_safe_outbound_url
         async with httpx.AsyncClient(timeout=8) as client:
             if integration_id == "slack":
                 url = config.get("webhook_url", "")
                 if not url:
                     return {"success": False, "error": "No webhook URL configured"}
+                if not is_safe_outbound_url(url):
+                    return {"success": False, "error": "Refused: webhook URL resolves to a private/internal address"}
                 resp = await client.post(url, json={"text": "FalconOps connectivity test"})
                 return {"success": resp.status_code == 200, "message": f"Slack responded with {resp.status_code}", "tested_at": datetime.now(timezone.utc).isoformat()}
             elif integration_id == "custom_webhook":
                 url = config.get("url", "")
                 if not url:
                     return {"success": False, "error": "No URL configured"}
+                if not is_safe_outbound_url(url):
+                    return {"success": False, "error": "Refused: URL resolves to a private/internal address"}
                 headers = {}
                 if config.get("auth_header"):
                     headers["Authorization"] = config["auth_header"]

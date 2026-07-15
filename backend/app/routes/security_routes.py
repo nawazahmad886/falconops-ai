@@ -11,6 +11,7 @@ from ..utils.auth import require_auth, require_write_access, get_current_user
 from ..services.security_service import (
     ingest_security_event,
     get_security_dashboard,
+    get_auth_security_dashboard,
     get_threats,
     get_user_activity,
     get_security_events,
@@ -90,6 +91,16 @@ async def security_dashboard(
 ):
     """Get security monitoring dashboard overview"""
     return await get_security_dashboard(hours)
+
+
+@router.get("/auth-dashboard")
+async def auth_security_dashboard(
+    hours: int = Query(24, description="Time range in hours"),
+    current_user: Optional[dict] = Depends(get_current_user),
+):
+    """Authentication-specific security dashboard: login/signup success-failure
+    counts, top attacking IPs, failures by country, and auth-threat counts."""
+    return await get_auth_security_dashboard(hours)
 
 
 # ======================== THREATS ========================

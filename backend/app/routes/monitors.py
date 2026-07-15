@@ -139,7 +139,11 @@ async def create_monitor(monitor: MonitorCreate, current_user: dict = Depends(re
 @router.get("/{monitor_id}", response_model=MonitorResponse)
 async def get_monitor(monitor_id: str, current_user: Optional[dict] = Depends(get_current_user)):
     """Get single monitor by ID"""
-    monitor = await db.monitors.find_one({"id": monitor_id}, {"_id": 0})
+    query = {"id": monitor_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    monitor = await db.monitors.find_one(query, {"_id": 0})
     if not monitor:
         raise HTTPException(status_code=404, detail="Monitor not found")
     return MonitorResponse(**monitor)
@@ -148,10 +152,14 @@ async def get_monitor(monitor_id: str, current_user: Optional[dict] = Depends(ge
 @router.put("/{monitor_id}", response_model=MonitorResponse)
 async def update_monitor(monitor_id: str, monitor: MonitorCreate, current_user: dict = Depends(require_write_access)):
     """Update a monitor"""
-    existing = await db.monitors.find_one({"id": monitor_id})
+    query = {"id": monitor_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    existing = await db.monitors.find_one(query)
     if not existing:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    
+
     update_data = {
         "name": monitor.name,
         "target": monitor.target,
@@ -169,20 +177,24 @@ async def update_monitor(monitor_id: str, monitor: MonitorCreate, current_user: 
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
     
-    await db.monitors.update_one({"id": monitor_id}, {"$set": update_data})
-    updated = await db.monitors.find_one({"id": monitor_id}, {"_id": 0})
+    await db.monitors.update_one(query, {"$set": update_data})
+    updated = await db.monitors.find_one(query, {"_id": 0})
     return MonitorResponse(**updated)
 
 
 @router.delete("/{monitor_id}")
 async def delete_monitor(monitor_id: str, current_user: dict = Depends(require_write_access)):
     """Delete a monitor"""
-    result = await db.monitors.delete_one({"id": monitor_id})
+    query = {"id": monitor_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    result = await db.monitors.delete_one(query)
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    
+
     await db.monitor_results.delete_many({"monitor_id": monitor_id})
-    
+
     return {"message": "Monitor deleted successfully"}
 
 

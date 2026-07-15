@@ -2,6 +2,7 @@
 FalconOps AI - Impact Analysis Engine
 Blast radius analysis — maps affected services, users, and dependencies from incidents
 """
+import re
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -31,7 +32,7 @@ async def analyze_blast_radius(incident: Dict) -> Dict:
     try:
         service_nodes = await db.topology_services.find(
             {"$or": [
-                {"name": {"$regex": service, "$options": "i"}} if service else {"_id": None},
+                {"name": {"$regex": re.escape(service), "$options": "i"}} if service else {"_id": None},
                 {"host": host} if host else {"_id": None},
             ]},
             {"_id": 0}
@@ -76,7 +77,7 @@ async def analyze_blast_radius(incident: Dict) -> Dict:
     try:
         viol_query = {"state": {"$in": ["active", "critical", "warning"]}, "timestamp": {"$gte": cutoff}}
         if host:
-            viol_query["source_name"] = {"$regex": host, "$options": "i"}
+            viol_query["source_name"] = {"$regex": re.escape(host), "$options": "i"}
         violations = await db["db.health_violations"].find(viol_query, {"_id": 0}).limit(10).to_list(10)
         for v in violations:
             related_violations.append({
@@ -135,7 +136,7 @@ async def analyze_blast_radius(incident: Dict) -> Dict:
     try:
         mon_query = {"status": {"$in": ["down", "degraded"]}}
         if host:
-            mon_query["$or"] = [{"url": {"$regex": host, "$options": "i"}}, {"name": {"$regex": host, "$options": "i"}}]
+            mon_query["$or"] = [{"url": {"$regex": re.escape(host), "$options": "i"}}, {"name": {"$regex": re.escape(host), "$options": "i"}}]
         monitors = await db.monitors.find(mon_query, {"_id": 0, "name": 1, "url": 1, "status": 1, "type": 1}).limit(10).to_list(10)
         for m in monitors:
             affected_monitors.append(m)

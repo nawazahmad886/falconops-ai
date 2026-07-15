@@ -188,7 +188,13 @@ async def create_tenant_user(
     # Check access
     if current_user.get("role") != "admin" and current_user.get("tenant_id") != tenant_id:
         raise HTTPException(status_code=403, detail="Access denied")
-    
+
+    # A non-global-admin creating a user within their own tenant must not be able to
+    # self-escalate by minting a new "admin" (or any other elevated) account — "admin"
+    # is a global flag here (checked by require_admin everywhere), not tenant-scoped.
+    if user.role not in ("user", "viewer") and current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Only a global admin can assign elevated roles")
+
     # Check tenant exists and user limit
     tenant = await db.tenants.find_one({"id": tenant_id})
     if not tenant:

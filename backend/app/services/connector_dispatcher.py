@@ -43,6 +43,10 @@ async def _send_slack(config: Dict, payload: Dict) -> bool:
     url = config.get("webhook_url")
     if not url:
         return False
+    from .ssrf_guard import is_safe_outbound_url
+    if not is_safe_outbound_url(url):
+        logger.warning("Slack dispatch refused: webhook URL resolves to a private/internal address")
+        return False
     try:
         sev = payload.get("severity", "info")
         blocks = [
@@ -168,6 +172,10 @@ async def _send_custom_webhook(config: Dict, payload: Dict) -> bool:
     """Forward event to a custom HTTP endpoint"""
     url = config.get("url")
     if not url:
+        return False
+    from .ssrf_guard import is_safe_outbound_url
+    if not is_safe_outbound_url(url):
+        logger.warning("Custom webhook dispatch refused: URL resolves to a private/internal address")
         return False
     try:
         method = config.get("method", "POST").upper()

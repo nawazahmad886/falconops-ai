@@ -238,6 +238,25 @@ app.add_middleware(
 
 
 # ──────────────────────────────────────────────
+#  Security Headers Middleware
+#  Applied at the FastAPI app level so these are real regardless of what (if anything)
+#  sits in front of it — an on-prem nginx gateway or a cloud ALB/CloudFront may add its
+#  own copies, but the app no longer depends on that being present.
+# ──────────────────────────────────────────────
+@app.middleware("http")
+async def security_headers_middleware(request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    # Swagger/Redoc load their assets from a CDN — skip CSP there so /docs stays usable.
+    if request.url.path not in ("/docs", "/redoc"):
+        response.headers["Content-Security-Policy"] = "default-src 'self'; frame-ancestors 'none'; base-uri 'self'"
+    return response
+
+
+# ──────────────────────────────────────────────
 #  Tenant Routing Middleware
 #  Resolves the inbound request → tenant via Host header / path-prefix /t/{slug}.
 #  Stamps tenant context onto request.state for downstream handlers.

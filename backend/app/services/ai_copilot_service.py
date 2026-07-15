@@ -335,6 +335,19 @@ When discussing incidents or alerts, be specific and actionable."""
             if monitors_up or monitors_down:
                 parts.append(f"Monitors: {monitors_up} up, {monitors_down} down")
 
+            # Security threats + auth activity — so this copilot can actually answer
+            # security questions instead of only ops/health ones.
+            active_threats = await db.security_threats.count_documents({"status": "active"})
+            critical_threats = await db.security_threats.count_documents({"status": "active", "severity": "critical"})
+            if active_threats > 0:
+                parts.append(f"{active_threats} active security threats ({critical_threats} critical)")
+            recent_failed_logins = await db.security_events.count_documents({
+                "action": "login_failed",
+                "timestamp": {"$gte": (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()},
+            })
+            if recent_failed_logins > 0:
+                parts.append(f"{recent_failed_logins} failed login attempt(s) in the last 24h")
+
             return "\n".join(parts) if parts else "System healthy - no active issues"
         except Exception as e:
             logger.warning(f"Failed to get system context: {e}")

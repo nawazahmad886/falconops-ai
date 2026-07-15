@@ -2,6 +2,7 @@
 FalconOps AI - RBAC & Audit Logs Service
 Enterprise role-based access control with granular permissions and comprehensive audit trail
 """
+import re
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -190,7 +191,7 @@ async def get_audit_logs(hours: int = 24, user_email: str = None, action: str = 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     query = {"timestamp": {"$gte": cutoff}}
     if user_email:
-        query["user_email"] = {"$regex": user_email, "$options": "i"}
+        query["user_email"] = {"$regex": re.escape(user_email), "$options": "i"}
     if action:
         query["action"] = action
     if resource:

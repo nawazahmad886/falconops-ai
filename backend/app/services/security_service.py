@@ -2,6 +2,7 @@
 FalconOps AI - Security Monitoring & Threat Detection Service
 Real-time security event processing, threat detection, and user behavior analysis
 """
+import re
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -21,10 +22,26 @@ _failed_logins = defaultdict(list)  # ip -> [timestamps]
 _user_locations = defaultdict(list)  # user -> [(ip, timestamp)]
 _user_hosts = defaultdict(list)  # user -> [(host, timestamp)] — lateral-movement tracker
 _api_call_counts = defaultdict(list)  # user_or_ip -> [timestamps] — per-minute API call tracker
+_ip_failed_users = defaultdict(list)  # ip -> [(user, timestamp)] — credential-stuffing tracker
+_signup_attempts = defaultdict(list)  # ip -> [timestamps] — signup-abuse tracker
 BRUTE_FORCE_THRESHOLD = 5
 BRUTE_FORCE_WINDOW_MINUTES = 10
 LATERAL_MOVEMENT_HOST_THRESHOLD = 3
 LATERAL_MOVEMENT_WINDOW_MINUTES = 15
+CREDENTIAL_STUFFING_USER_THRESHOLD = 8
+CREDENTIAL_STUFFING_WINDOW_MINUTES = 10
+SIGNUP_ABUSE_THRESHOLD = 5
+SIGNUP_ABUSE_WINDOW_MINUTES = 30
+ACCOUNT_TAKEOVER_RISK_THRESHOLD = 50
+ACCOUNT_TAKEOVER_HISTORY_DAYS = 90
+
+# Known automation/headless-browser/scripting client signatures — a coarse but real
+# signal (not a fabricated one): legitimate browsers never send these tokens.
+_BOT_UA_PATTERNS = re.compile(
+    r"selenium|headlesschrome|phantomjs|puppeteer|playwright|python-requests|"
+    r"scrapy|curl/|wget/|go-http-client|okhttp|axios/|bot|crawler|spider",
+    re.IGNORECASE,
+)
 
 
 # ======================== THREAT DETECTION ENGINE ========================
@@ -38,6 +55,14 @@ class ThreatDetectionEngine:
 
         if event.get("action") in ("login_failed", "auth_failure"):
             t = await self._check_brute_force(event)
+            if t:
+                threats.append(t)
+            t = await self._check_credential_stuffing(event)
+            if t:
+                threats.append(t)
+
+        if event.get("action") in ("signup", "signup_failed"):
+            t = await self._check_signup_abuse(event)
             if t:
                 threats.append(t)
 
@@ -60,9 +85,17 @@ class ThreatDetectionEngine:
             t = await self._check_lateral_movement(event)
             if t:
                 threats.append(t)
+            t = await self._check_account_takeover_risk(event)
+            if t:
+                threats.append(t)
 
         if event.get("category") == "application" or event.get("action") == "api_access":
             t = await self._check_api_abuse(event)
+            if t:
+                threats.append(t)
+
+        if event.get("action") in ("login_success", "login_failed", "signup", "signup_failed"):
+            t = await self._check_bot_traffic(event)
             if t:
                 threats.append(t)
 
@@ -97,6 +130,149 @@ class ThreatDetectionEngine:
                 "mitre_technique": mitre.get("mitre_technique", "T1110 - Brute Force"),
             }
         return None
+
+    async def _check_credential_stuffing(self, event: Dict) -> Optional[Dict]:
+        """Distinguishes credential stuffing from brute force: brute force is many failed
+        attempts against ONE username from an IP; credential stuffing is failed attempts
+        against MANY DISTINCT usernames from one IP — the signature of testing a leaked
+        username/password list. Needs no password data (which we deliberately never log),
+        just the username + IP already captured on every failed login."""
+        ip = event.get("source_ip", "unknown")
+        user = event.get("user", "unknown")
+        if not ip or ip == "unknown" or not user or user == "unknown":
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=CREDENTIAL_STUFFING_WINDOW_MINUTES)
+
+        _ip_failed_users[ip] = [(u, t) for u, t in _ip_failed_users[ip] if t > cutoff]
+        _ip_failed_users[ip].append((user, now))
+
+        distinct_users = {u for u, _ in _ip_failed_users[ip]}
+        if len(distinct_users) >= CREDENTIAL_STUFFING_USER_THRESHOLD:
+            mitre = mitre_mapping_service.classify_mitre_primary("credential stuffing repeated login failed logins") or {}
+            return {
+                "id": str(uuid.uuid4()),
+                "type": "credential_stuffing",
+                "severity": "critical",
+                "source_ip": ip,
+                "message": f"Possible credential stuffing: failed logins against {len(distinct_users)} distinct "
+                           f"usernames from {ip} in {CREDENTIAL_STUFFING_WINDOW_MINUTES}min",
+                "distinct_usernames": len(distinct_users),
+                "timestamp": now.isoformat(),
+                "status": "active",
+                "mitre_tactic": mitre.get("mitre_tactic", "Credential Access"),
+                "mitre_technique": mitre.get("mitre_technique", "T1110 - Brute Force"),
+            }
+        return None
+
+    async def _check_signup_abuse(self, event: Dict) -> Optional[Dict]:
+        """Mass-registration / signup-abuse proxy: many registration attempts from one IP
+        in a short window (fake accounts, bot registrations, enumeration of existing
+        emails via the 'already registered' response)."""
+        ip = event.get("source_ip", "unknown")
+        if not ip or ip == "unknown":
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=SIGNUP_ABUSE_WINDOW_MINUTES)
+
+        _signup_attempts[ip] = [t for t in _signup_attempts[ip] if t > cutoff]
+        _signup_attempts[ip].append(now)
+
+        if len(_signup_attempts[ip]) >= SIGNUP_ABUSE_THRESHOLD:
+            mitre = mitre_mapping_service.classify_mitre_primary("account discovery user enumeration") or {}
+            return {
+                "id": str(uuid.uuid4()),
+                "type": "signup_abuse",
+                "severity": "medium",
+                "source_ip": ip,
+                "message": f"Possible signup abuse: {len(_signup_attempts[ip])} registration attempt(s) "
+                           f"from {ip} in {SIGNUP_ABUSE_WINDOW_MINUTES}min",
+                "attempt_count": len(_signup_attempts[ip]),
+                "timestamp": now.isoformat(),
+                "status": "active",
+                "mitre_tactic": mitre.get("mitre_tactic", "Reconnaissance"),
+                "mitre_technique": mitre.get("mitre_technique", "T1589 - Gather Victim Identity Information"),
+            }
+        return None
+
+    async def _check_account_takeover_risk(self, event: Dict) -> Optional[Dict]:
+        """Composite account-takeover risk score on a successful login: is this IP,
+        geo, and/or device genuinely new for this user, based on their real login
+        history (not a fabricated score). A user's first-ever login has nothing to
+        compare against and is never flagged."""
+        user = event.get("user", "unknown")
+        if not user or user == "unknown":
+            return None
+        ip = event.get("source_ip", "")
+        geo = event.get("geo_location", "")
+        device = event.get("user_agent", "")
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=ACCOUNT_TAKEOVER_HISTORY_DAYS)).isoformat()
+        history = await db.security_events.find({
+            "user": user, "action": "login_success",
+            "timestamp": {"$gte": cutoff, "$lt": event.get("timestamp", datetime.now(timezone.utc).isoformat())},
+        }, {"_id": 0, "source_ip": 1, "geo_location": 1, "user_agent": 1}).sort("timestamp", -1).limit(50).to_list(50)
+
+        if not history:
+            return None  # no prior logins to compare against — not suspicious, just new
+
+        known_ips = {h.get("source_ip") for h in history if h.get("source_ip")}
+        known_geos = {h.get("geo_location") for h in history if h.get("geo_location")}
+        known_devices = {h.get("user_agent") for h in history if h.get("user_agent")}
+
+        risk = 0
+        reasons = []
+        if ip and known_ips and ip not in known_ips:
+            risk += 30
+            reasons.append("new IP address")
+        if geo and known_geos and geo not in known_geos:
+            risk += 35
+            reasons.append("new geographic location")
+        if device and known_devices and device not in known_devices:
+            risk += 25
+            reasons.append("new device/browser")
+
+        if risk < ACCOUNT_TAKEOVER_RISK_THRESHOLD:
+            return None
+
+        mitre = mitre_mapping_service.classify_mitre_primary("valid account compromise") or {}
+        return {
+            "id": str(uuid.uuid4()),
+            "type": "account_takeover_risk",
+            "severity": "critical" if risk >= 80 else "high",
+            "user": user,
+            "source_ip": ip,
+            "message": f"Elevated account-takeover risk for {user}: {', '.join(reasons)} (risk {risk}/100)",
+            "risk_score": risk,
+            "risk_factors": reasons,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+            "mitre_tactic": mitre.get("mitre_tactic", "Initial Access"),
+            "mitre_technique": mitre.get("mitre_technique", "T1078 - Valid Accounts"),
+        }
+
+    async def _check_bot_traffic(self, event: Dict) -> Optional[Dict]:
+        """Flags known automation/headless-browser/scripting client signatures on
+        auth-related requests — a real (if coarse) signal since legitimate human
+        browsers never send these User-Agent tokens."""
+        ua = event.get("user_agent") or ""
+        if not ua or not _BOT_UA_PATTERNS.search(ua):
+            return None
+        mitre = mitre_mapping_service.classify_mitre_primary("api abuse abnormal api") or {}
+        return {
+            "id": str(uuid.uuid4()),
+            "type": "bot_traffic",
+            "severity": "medium",
+            "user": event.get("user", "unknown"),
+            "source_ip": event.get("source_ip", "unknown"),
+            "message": f"Automated/bot-like client detected on {event.get('action')}: "
+                       f"user-agent matched known automation signature",
+            "user_agent": ua[:200],
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+            "mitre_tactic": mitre.get("mitre_tactic", "Execution"),
+            "mitre_technique": mitre.get("mitre_technique", "T1106 - Native API"),
+        }
 
     async def _check_malicious_ip(self, event: Dict) -> Optional[Dict]:
         ip = event.get("source_ip", "")
@@ -415,6 +591,52 @@ async def get_security_dashboard(hours: int = 24) -> Dict:
     }
 
 
+async def get_auth_security_dashboard(hours: int = 24) -> Dict:
+    """Authentication-specific security dashboard: success/failure counts, signups,
+    top attacking IPs, failures by country, and counts of the auth-specific threat
+    types (credential stuffing, signup abuse, account-takeover risk, bot traffic)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    base_query = {"timestamp": {"$gte": cutoff}, "category": "authentication"}
+
+    login_success = await db.security_events.count_documents({**base_query, "action": "login_success"})
+    login_failed = await db.security_events.count_documents({**base_query, "action": "login_failed"})
+    signups = await db.security_events.count_documents({**base_query, "action": "signup"})
+    signup_failed = await db.security_events.count_documents({**base_query, "action": "signup_failed"})
+
+    top_ip_pipeline = [
+        {"$match": {**base_query, "action": "login_failed"}},
+        {"$group": {"_id": "$source_ip", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 10},
+    ]
+    top_ips = await db.security_events.aggregate(top_ip_pipeline).to_list(10)
+
+    country_pipeline = [
+        {"$match": {**base_query, "action": "login_failed", "geo_location": {"$ne": ""}}},
+        {"$group": {"_id": "$geo_location", "count": {"$sum": 1}}},
+        {"$sort": {"count": -1}},
+        {"$limit": 10},
+    ]
+    by_country = await db.security_events.aggregate(country_pipeline).to_list(10)
+
+    threat_query = {"timestamp": {"$gte": cutoff}, "status": "active"}
+    auth_threat_counts = {}
+    for t in ("credential_stuffing", "signup_abuse", "account_takeover_risk", "bot_traffic", "brute_force", "impossible_travel"):
+        auth_threat_counts[t] = await db.security_threats.count_documents({**threat_query, "type": t})
+
+    return {
+        "login_success": login_success,
+        "login_failed": login_failed,
+        "signups": signups,
+        "signup_failed": signup_failed,
+        "success_rate": round(100 * login_success / max(login_success + login_failed, 1), 1),
+        "top_attacking_ips": [{"ip": r["_id"], "count": r["count"]} for r in top_ips],
+        "failures_by_country": [{"country": r["_id"], "count": r["count"]} for r in by_country],
+        "threat_counts": auth_threat_counts,
+        "hours": hours,
+    }
+
+
 async def get_threats(status: str = "active", severity: str = None, limit: int = 50) -> List[Dict]:
     """Get threats with filters"""
     query = {}
@@ -494,10 +716,11 @@ async def get_security_events(
     if action:
         query["action"] = action
     if search:
+        escaped = re.escape(search)
         query["$or"] = [
-            {"message": {"$regex": search, "$options": "i"}},
-            {"user": {"$regex": search, "$options": "i"}},
-            {"source_ip": {"$regex": search, "$options": "i"}},
+            {"message": {"$regex": escaped, "$options": "i"}},
+            {"user": {"$regex": escaped, "$options": "i"}},
+            {"source_ip": {"$regex": escaped, "$options": "i"}},
         ]
 
     events = await db.security_events.find(query, {"_id": 0}).sort("timestamp", -1).skip(offset).limit(limit).to_list(limit)

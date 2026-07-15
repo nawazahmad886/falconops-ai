@@ -5,6 +5,7 @@ Enterprise-grade runbook execution with multiple action types
 import uuid
 import asyncio
 import subprocess
+import shlex
 import httpx
 import json
 from datetime import datetime, timezone
@@ -225,11 +226,16 @@ class RunbookEngine:
         headers = config.get("headers", {})
         body = config.get("body")
         timeout = config.get("timeout", 30)
-        
+
+        from .ssrf_guard import is_safe_outbound_url
+        if not is_safe_outbound_url(url):
+            return {"status_code": 0, "response_body": "Refused: URL resolves to a private/internal address",
+                    "success": False}
+
         # Interpolate variables in URL and body
         if body:
             body = self._interpolate_variables(str(body))
-        
+
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.request(
                 method=method,
@@ -245,19 +251,25 @@ class RunbookEngine:
         }
     
     async def _execute_shell_command(self, step: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a shell command (sandboxed simulation)"""
+        """Execute a shell command from a strict allowlist. Runs via the list form
+        (shell=False) rather than a raw string through a shell — shell metacharacters
+        (;, &&, |, backticks, $()) in a step's config can then never break out of the
+        allowed command; they just become literal (and typically invalid) arguments to
+        it, instead of being interpreted by /bin/sh as previously."""
         config = step.get("config", {})
         command = config.get("command", "echo 'No command specified'")
-        
-        # For security, only simulate certain safe commands
+
         safe_commands = ["echo", "date", "whoami", "hostname", "uptime", "df", "free", "ps", "top", "cat", "ls", "pwd"]
-        cmd_parts = command.split()
-        
+        try:
+            cmd_parts = shlex.split(command)
+        except ValueError:
+            return {"command": command, "error": "Could not parse command", "success": False}
+
         if cmd_parts and cmd_parts[0] in safe_commands:
             try:
                 result = subprocess.run(
-                    command,
-                    shell=True,
+                    cmd_parts,
+                    shell=False,
                     capture_output=True,
                     text=True,
                     timeout=30
@@ -271,6 +283,8 @@ class RunbookEngine:
                 }
             except subprocess.TimeoutExpired:
                 return {"command": command, "error": "Command timeout", "success": False}
+            except Exception as e:
+                return {"command": command, "error": str(e)[:300], "success": False}
         else:
             return {
                 "command": command,

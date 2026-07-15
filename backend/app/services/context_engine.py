@@ -9,6 +9,7 @@ Enriches an inbound event/incident with the surrounding context an AI agent need
 The Context Engine is the foundation of the autonomous AI pipeline — every
 agent (SRE, Security, Cost, Prevention) consumes context-enriched events.
 """
+import re
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
@@ -26,7 +27,7 @@ async def get_history_for_service(service: str, limit: int = 50, hours: int = 16
     cursor = db.event_data.aggregate([
         {"$unwind": "$events"},
         {"$match": {
-            "events.service": {"$regex": f"^{service}$", "$options": "i"},
+            "events.service": {"$regex": f"^{re.escape(service)}$", "$options": "i"},
             "events.timestamp": {"$gte": cutoff},
         }},
         {"$replaceRoot": {"newRoot": "$events"}},
@@ -74,8 +75,8 @@ async def get_runbook(alert: str) -> Optional[Dict]:
         return None
     doc = await db.runbooks.find_one(
         {"$or": [
-            {"alert_name": {"$regex": f"^{alert}$", "$options": "i"}},
-            {"matches": {"$regex": alert, "$options": "i"}},
+            {"alert_name": {"$regex": f"^{re.escape(alert)}$", "$options": "i"}},
+            {"matches": {"$regex": re.escape(alert), "$options": "i"}},
         ]},
         {"_id": 0},
     )
@@ -90,8 +91,8 @@ async def get_severity_baseline(service: str, alert: str, hours: int = 168) -> D
     pipeline = [
         {"$unwind": "$events"},
         {"$match": {
-            "events.service": {"$regex": f"^{service}$", "$options": "i"},
-            "events.alert": {"$regex": f"^{alert}$", "$options": "i"},
+            "events.service": {"$regex": f"^{re.escape(service)}$", "$options": "i"},
+            "events.alert": {"$regex": f"^{re.escape(alert)}$", "$options": "i"},
             "events.timestamp": {"$gte": cutoff},
         }},
         {"$count": "n"},

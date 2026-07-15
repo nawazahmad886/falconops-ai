@@ -97,14 +97,16 @@ async def list_audit_logs(
     resource: Optional[str] = Query(None),
     limit: int = Query(100, le=500),
     offset: int = Query(0),
-    current_user: dict = Depends(require_auth),
+    current_user: dict = Depends(require_admin),
 ):
+    """Admin-only: the audit trail spans all tenants (user emails, actions, IPs), so
+    this must not be reachable by a regular authenticated user of any tenant."""
     return await get_audit_logs(hours, user_email, action, resource, limit, offset)
 
 
 @router.get("/audit/stats")
 async def audit_stats(
     hours: int = Query(24),
-    current_user: dict = Depends(require_auth),
+    current_user: dict = Depends(require_admin),
 ):
     return await get_audit_stats(hours)

@@ -1,5 +1,6 @@
-# FalconOps AI - Nginx Gateway Configuration
-# Reverse proxy for frontend and backend services
+# FalconOps AI - Nginx Gateway Configuration (HTTPS enabled)
+# Generated from this template by ./setup-https.sh — DOMAIN_PLACEHOLDER is substituted
+# with your real domain. Re-run that script (not a hand-edit) if the domain changes.
 
 upstream frontend_upstream {
     server frontend:3000;
@@ -9,58 +10,64 @@ upstream backend_upstream {
     server backend:8001;
 }
 
-# Rate limiting zones
 limit_req_zone $binary_remote_addr zone=api_limit:10m rate=30r/s;
 limit_req_zone $binary_remote_addr zone=auth_limit:10m rate=5r/s;
 
+# Plain HTTP: keep the ACME challenge reachable (renewals need it), redirect
+# everything else to HTTPS.
 server {
     listen 80;
-    server_name _;
+    server_name DOMAIN_PLACEHOLDER;
 
-    # Security headers
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name DOMAIN_PLACEHOLDER;
+
+    ssl_certificate /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/DOMAIN_PLACEHOLDER/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header X-XSS-Protection "1; mode=block" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' wss: ws:;" always;
 
-    # Gzip compression
     gzip on;
     gzip_vary on;
     gzip_proxied any;
     gzip_comp_level 6;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript;
 
-    # Client body size (for file uploads)
     client_max_body_size 50M;
 
-    # Let's Encrypt ACME HTTP-01 challenge — must be reachable over plain HTTP even
-    # after HTTPS is enabled below, since certbot re-validates on every renewal.
-    location /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-    }
-
-    # API routes -> Backend
     location /api/ {
         limit_req zone=api_limit burst=50 nodelay;
-
         proxy_pass http://backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
-
-        # Timeout settings
         proxy_connect_timeout 30s;
         proxy_send_timeout 60s;
         proxy_read_timeout 120s;
     }
 
-    # Auth routes - stricter rate limit
     location /api/auth/ {
         limit_req zone=auth_limit burst=10 nodelay;
-
         proxy_pass http://backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -69,7 +76,6 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # WebSocket connections
     location /ws/ {
         proxy_pass http://backend_upstream;
         proxy_http_version 1.1;
@@ -81,14 +87,12 @@ server {
         proxy_read_timeout 86400;
     }
 
-    # Health check endpoint (no rate limit)
     location /api/health {
         proxy_pass http://backend_upstream;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
     }
 
-    # Frontend (React SPA)
     location / {
         proxy_pass http://frontend_upstream;
         proxy_http_version 1.1;
@@ -99,10 +103,3 @@ server {
         proxy_set_header Connection "upgrade";
     }
 }
-
-# HTTPS is disabled by default — this HTTP-only config is what a fresh install runs
-# on. Run ./setup-https.sh --domain your-real-domain (once DNS points at this host)
-# to obtain a real Let's Encrypt certificate and switch to nginx/https.conf.template
-# (which redirects everything except the ACME challenge path to HTTPS). Do not hand-edit
-# this file to add a 443 block — nginx refuses to start if the referenced cert files
-# don't exist yet, which is exactly what happens before a cert has been issued.

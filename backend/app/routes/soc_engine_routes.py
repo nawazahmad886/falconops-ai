@@ -2,10 +2,11 @@
 FalconOps AI - SOC Ingestion Routes + Admin Agent Configuration
 """
 from typing import Optional, List
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from pydantic import BaseModel
 
 from ..utils.auth import require_auth, require_admin
+from ..services.rate_limiter_service import is_rate_limited
 from ..services.soc_ingestion_service import (
     ingest_event, ingest_batch, get_recent_events,
     get_incidents, get_ingestion_stats, get_ingestion_config, update_ingestion_config,
@@ -19,7 +20,19 @@ from ..services.ai_agents_service import (
 router = APIRouter(prefix="/api/soc-engine", tags=["SOC Engine"])
 
 
+def _client_ip(request: Request) -> str:
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
 # ======================== INGESTION ========================
+# /ingest and /ingest/batch are deliberately unauthenticated (external log sources with
+# no user session), so a per-IP rate limit is the only abuse guard available here — if
+# this is exposed to the public internet, consider adding a per-source API key too.
+INGEST_RATE_LIMIT = (60, 60)        # 60 events / minute per IP
+INGEST_BATCH_RATE_LIMIT = (10, 60)  # 10 batch calls / minute per IP
 
 class IngestRequest(BaseModel):
     source: Optional[str] = "api"
@@ -38,14 +51,20 @@ class BatchIngestRequest(BaseModel):
 
 
 @router.post("/ingest")
-async def ingest(req: IngestRequest):
+async def ingest(req: IngestRequest, request: Request):
     """Universal event ingestion (no auth for external sources)"""
+    ip = _client_ip(request)
+    if await is_rate_limited(f"soc_ingest:{ip}", *INGEST_RATE_LIMIT):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     return await ingest_event(req.dict())
 
 
 @router.post("/ingest/batch")
-async def batch_ingest(req: BatchIngestRequest):
+async def batch_ingest(req: BatchIngestRequest, request: Request):
     """Batch ingest multiple events"""
+    ip = _client_ip(request)
+    if await is_rate_limited(f"soc_ingest_batch:{ip}", *INGEST_BATCH_RATE_LIMIT):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
     return await ingest_batch(req.events)
 
 

@@ -116,7 +116,7 @@ credentials.json
 # FalconOps — never commit test credentials or memory
 memory/test_credentials.md
 frontend/node_modules/.cache/default-development/19.pack
--e 
+-e
 # Environment and credential files
 .env
 .env.*
@@ -144,3 +144,8 @@ frontend/node_modules/.cache/default-development/20.pack
 .gitconfig
 /Health
 test_reports/
+
+# ...except committed env templates (placeholders only, never real secrets) — must be
+# last in the file since earlier .env.* patterns above would otherwise re-ignore these.
+!.env.example
+!backend/.env.example

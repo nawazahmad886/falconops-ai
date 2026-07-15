@@ -171,7 +171,7 @@ class LogsService:
         
         # Text search in message
         if query:
-            mongo_query["message"] = {"$regex": query, "$options": "i"}
+            mongo_query["message"] = {"$regex": re.escape(query), "$options": "i"}
         
         # Level filter
         if level:

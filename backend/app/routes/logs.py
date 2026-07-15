@@ -2,6 +2,7 @@
 FalconOps AI - Logs Monitoring Routes
 API endpoints for log ingestion, analysis, and AI-powered insights
 """
+import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
@@ -150,7 +151,7 @@ async def get_logs(
     if category:
         query["category"] = category
     if search:
-        query["message"] = {"$regex": search, "$options": "i"}
+        query["message"] = {"$regex": re.escape(search), "$options": "i"}
     
     logs = await db.logs.find(query, {"_id": 0}).sort("timestamp", -1).skip(offset).limit(limit).to_list(limit)
     total = await db.logs.count_documents(query)

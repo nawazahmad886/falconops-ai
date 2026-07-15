@@ -1,33 +1,34 @@
 #!/usr/bin/env bash
-# FalconOps AI — RHEL/CentOS/Rocky/Alma 7 & 8 installer (Docker Compose route)
+# FalconOps AI — generic Debian/Ubuntu installer (Docker Compose route)
 #
-# Why Docker and not a native install: this stack pins MongoDB 7 (dropped RHEL 7
-# support upstream), Node 20 (needs glibc >= 2.28; RHEL 7 ships 2.17), and a
-# heavy Python ML dependency chain (torch/transformers/chromadb/onnxruntime for
-# the RAG layer) that's fragile to build from source on an old base image.
-# Docker sidesteps all of that — the host OS version stops mattering once
-# everything runs in containers.
+# For any Docker-capable VPS/cloud host running Debian or Ubuntu (the default
+# on most providers — DigitalOcean, Linode, Hetzner, a bare EC2/VM, etc.). For
+# RHEL/CentOS/Rocky/Alma, use install-rhel.sh instead.
 #
-# What this script does:
-#   1. Installs Docker CE + the compose plugin (yum on el7, dnf on el8+)
-#   2. Opens only 80/443 in firewalld (nginx is the sole external entrypoint —
+# What this does:
+#   1. Installs Docker CE + the compose plugin (apt, official Docker repo)
+#   2. Opens only 80/443 via ufw (nginx is the sole external entrypoint —
 #      mongo/redis/backend/frontend are bound to 127.0.0.1 in docker-compose.yml)
-#   3. Generates backend/.env with a random JWT secret + your domain's CORS
-#      origin, if one doesn't already exist (safe to re-run — never overwrites)
+#   3. Generates the repo-root .env (random Mongo/Redis passwords) and
+#      backend/.env (random JWT secret, CORS for your domain), if they don't
+#      already exist (safe to re-run — never overwrites)
 #   4. Builds and starts the stack
 #
 # Usage (run as root, from the repo root):
-#   ./install-rhel.sh --domain your-domain-or-ip [--llm-provider ollama|openai|anthropic|gemini|rule_based]
+#   ./install.sh --domain your-domain-or-ip [--llm-provider ollama|openai|anthropic|gemini|rule_based]
 #
 # Optional flags:
 #   --skip-docker      skip Docker install (use if already installed)
-#   --skip-firewall    skip firewalld changes (use if you manage it separately)
+#   --skip-firewall    skip ufw changes (use if you manage it separately)
+#
+# Once DNS for a real domain points at this host, enable real HTTPS with:
+#   ./setup-https.sh --domain your-domain.com
 set -euo pipefail
 
 say()  { echo -e "\033[1;36m[falconops-install]\033[0m $*"; }
 fail() { echo -e "\033[1;31m[falconops-install] ERROR:\033[0m $*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || fail "run as root (sudo ./install-rhel.sh ...)"
+[ "$(id -u)" -eq 0 ] || fail "run as root (sudo ./install.sh ...)"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -57,25 +58,13 @@ fi
 # ─────────────────────────────────────────────
 #  1. OS detection
 # ─────────────────────────────────────────────
-[ -f /etc/os-release ] || fail "/etc/os-release not found — this script targets RHEL/CentOS/Rocky/Alma"
+[ -f /etc/os-release ] || fail "/etc/os-release not found — this script targets Debian/Ubuntu"
 . /etc/os-release
-MAJOR_VER="${VERSION_ID%%.*}"
-say "Detected: ${PRETTY_NAME:-$ID $VERSION_ID} (major version $MAJOR_VER)"
-
+say "Detected: ${PRETTY_NAME:-$ID $VERSION_ID}"
 case "$ID" in
-  rhel|centos|rocky|almalinux) ;;
-  *) say "WARNING: untested distro '$ID' — proceeding anyway (this script assumes yum/dnf + firewalld + systemd)" ;;
+  debian|ubuntu) ;;
+  *) say "WARNING: untested distro '$ID' — proceeding anyway (this script assumes apt + ufw + systemd)" ;;
 esac
-
-if [ "$MAJOR_VER" -lt 7 ]; then
-  fail "RHEL/CentOS < 7 is not supported."
-fi
-if [ "$MAJOR_VER" -eq 7 ]; then
-  PKG=yum
-  say "el7 detected — Docker route is REQUIRED here (MongoDB 7 / Node 20 do not support el7 natively)."
-else
-  PKG=dnf
-fi
 
 # ─────────────────────────────────────────────
 #  2. Docker install
@@ -85,16 +74,17 @@ if [ "$SKIP_DOCKER" -eq 1 ]; then
 elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   say "Docker + compose plugin already present, skipping install."
 else
-  say "Installing Docker CE + compose plugin via $PKG..."
-  if [ "$PKG" = "yum" ]; then
-    yum install -y yum-utils device-mapper-persistent-data lvm2 git curl policycoreutils-python-utils
-    yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-    yum install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-  else
-    dnf install -y dnf-plugins-core git curl policycoreutils-python-utils
-    dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
-    dnf install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-  fi
+  say "Installing Docker CE + compose plugin via apt..."
+  apt-get update -y
+  apt-get install -y ca-certificates curl gnupg
+  install -m 0755 -d /etc/apt/keyrings
+  curl -fsSL "https://download.docker.com/linux/$ID/gpg" -o /etc/apt/keyrings/docker.asc
+  chmod a+r /etc/apt/keyrings/docker.asc
+  echo \
+    "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID $VERSION_CODENAME stable" \
+    > /etc/apt/sources.list.d/docker.list
+  apt-get update -y
+  apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   systemctl enable --now docker
   say "Docker installed: $(docker --version)"
 fi
@@ -105,31 +95,33 @@ fi
 # ─────────────────────────────────────────────
 if [ "$SKIP_FIREWALL" -eq 1 ]; then
   say "Skipping firewall changes (--skip-firewall)"
-elif command -v firewall-cmd >/dev/null 2>&1; then
-  systemctl enable --now firewalld 2>/dev/null || true
-  if systemctl is-active --quiet firewalld; then
-    firewall-cmd --permanent --add-service=http
-    firewall-cmd --permanent --add-service=https
-    firewall-cmd --reload
-    say "firewalld: opened http/https, reloaded."
+elif command -v ufw >/dev/null 2>&1; then
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+  if ufw status | grep -q "Status: active"; then
+    say "ufw: opened 80/443 on an already-active firewall."
   else
-    say "WARNING: firewalld installed but not active — leaving as-is. Ensure 80/443 are reachable another way."
+    say "ufw: rules added but firewall is inactive — 'ufw enable' if you want it enforced."
   fi
 else
-  say "WARNING: firewalld not found — skipping firewall config. Ensure 80/443 are reachable and nothing else is."
+  say "Installing ufw..."
+  apt-get install -y ufw
+  ufw allow OpenSSH || true
+  ufw allow 80/tcp
+  ufw allow 443/tcp
+  say "WARNING: ufw was just installed but NOT enabled (to avoid locking you out over SSH) — review 'ufw status' and run 'ufw enable' yourself once you've confirmed SSH access is allowed."
 fi
 
 # ─────────────────────────────────────────────
 #  4a. repo-root .env — MONGO_ROOT_PASSWORD / REDIS_PASSWORD used by
-#      docker-compose.yml's variable substitution (separate from backend/.env,
-#      which the *application* reads). Generated once, never overwritten.
+#      docker-compose.yml's variable substitution.
 # ─────────────────────────────────────────────
 if [ -f .env ]; then
   say "repo-root .env already exists — leaving it untouched."
 else
   say "Generating repo-root .env (random Mongo/Redis passwords)..."
   cat > .env <<EOF
-# Generated by install-rhel.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # Used by docker-compose.yml's variable substitution for the mongo/redis
 # containers — do NOT confuse with backend/.env (the application's own config).
 MONGO_ROOT_PASSWORD=$(openssl rand -hex 24)
@@ -149,7 +141,7 @@ else
   JWT_SECRET="$(openssl rand -hex 32)"
   LICENSE_SECRET="$(openssl rand -hex 32)"
   cat > backend/.env <<EOF
-# Generated by install-rhel.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+# Generated by install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ)
 # MONGO_URL / DB_NAME / REDIS_URL / VICTORIA_METRICS_URL / KAFKA_BOOTSTRAP_SERVERS
 # are overridden by docker-compose.yml's 'environment:' block to point at the
 # sidecar containers — no need to set them here for the Docker route.

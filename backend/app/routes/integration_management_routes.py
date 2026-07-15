@@ -87,4 +87,6 @@ async def test_integration_connection(
     current_user: dict = Depends(require_auth),
 ):
     """Test integration connectivity"""
+    if current_user.get("role") != "admin":
+        return {"error": "Admin access required"}
     return await test_integration(integration_id)

@@ -356,7 +356,11 @@ async def get_servers(
 @router.get("/{server_id}")
 async def get_server(server_id: str, current_user: Optional[dict] = Depends(get_current_user)):
     """Get single server details"""
-    server = await db.servers.find_one({"id": server_id}, {"_id": 0})
+    query = {"id": server_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    server = await db.servers.find_one(query, {"_id": 0})
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     return server
@@ -369,7 +373,11 @@ async def get_server_metrics(
     current_user: Optional[dict] = Depends(get_current_user)
 ):
     """Get server metrics history"""
-    server = await db.servers.find_one({"id": server_id})
+    query = {"id": server_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    server = await db.servers.find_one(query)
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     
@@ -386,7 +394,11 @@ async def get_server_metrics(
 @router.delete("/{server_id}")
 async def delete_server(server_id: str, current_user: dict = Depends(require_write_access)):
     """Delete a server and its metrics"""
-    result = await db.servers.delete_one({"id": server_id})
+    query = {"id": server_id}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    result = await db.servers.delete_one(query)
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Server not found")
     

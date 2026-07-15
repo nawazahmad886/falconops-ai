@@ -10,6 +10,8 @@ import {
     Activity,
     RefreshCw,
     MapPin,
+    KeyRound,
+    Bot,
 } from 'lucide-react';
 import {
     AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer,
@@ -42,6 +44,7 @@ const ScoreGauge = ({ label, value }) => {
 export default function ExecutiveSecurityDashboardPage() {
     const { api } = useAuth();
     const [data, setData] = useState(null);
+    const [authDashboard, setAuthDashboard] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
@@ -56,11 +59,20 @@ export default function ExecutiveSecurityDashboardPage() {
         }
     }, [api]);
 
+    const fetchAuthDashboard = useCallback(async () => {
+        try {
+            const res = await api.get('/security/auth-dashboard?hours=24');
+            setAuthDashboard(res.data);
+        } catch (e) {
+            console.error('Auth security dashboard fetch error:', e);
+        }
+    }, [api]);
+
     const loadAll = useCallback(async () => {
         setLoading(true);
-        await fetchOverview();
+        await Promise.all([fetchOverview(), fetchAuthDashboard()]);
         setLoading(false);
-    }, [fetchOverview]);
+    }, [fetchOverview, fetchAuthDashboard]);
 
     useEffect(() => { loadAll(); }, [loadAll]);
 
@@ -184,6 +196,52 @@ export default function ExecutiveSecurityDashboardPage() {
                         ))}
                     </CardContent>
                 </Card>
+
+                {/* Authentication Security */}
+                {authDashboard && (
+                    <Card className="bg-[#0D1117] border-white/5 lg:col-span-2">
+                        <CardHeader><CardTitle className="text-sm text-white/70 flex items-center gap-2"><KeyRound className="w-4 h-4" /> Authentication Security</CardTitle></CardHeader>
+                        <CardContent className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                            <div className="text-center">
+                                <p className="text-2xl font-bold text-emerald-400">{authDashboard.login_success}</p>
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider">Successful Logins</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-2xl font-bold text-red-400">{authDashboard.login_failed}</p>
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider">Failed Logins</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-2xl font-bold text-white">{authDashboard.signups}</p>
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider">New Signups</p>
+                            </div>
+                            <div className="text-center">
+                                <p className="text-2xl font-bold text-white">{authDashboard.success_rate}%</p>
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider">Success Rate</p>
+                            </div>
+                            <div className="col-span-2 md:col-span-2 space-y-1">
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider mb-1">Top Attacking IPs</p>
+                                {(authDashboard.top_attacking_ips || []).slice(0, 4).map(ip => (
+                                    <div key={ip.ip} className="flex justify-between text-xs">
+                                        <span className="text-white/60">{ip.ip}</span>
+                                        <span className="text-white/30">{ip.count}</span>
+                                    </div>
+                                ))}
+                                {(authDashboard.top_attacking_ips || []).length === 0 && (
+                                    <p className="text-xs text-white/30">No failed-login IPs in this window.</p>
+                                )}
+                            </div>
+                            <div className="col-span-2 md:col-span-2 space-y-1">
+                                <p className="text-[11px] text-white/40 uppercase tracking-wider mb-1 flex items-center gap-1"><Bot className="w-3 h-3" /> Auth Threat Counts</p>
+                                {Object.entries(authDashboard.threat_counts || {}).map(([type, count]) => (
+                                    <div key={type} className="flex justify-between text-xs">
+                                        <span className="text-white/60">{type.replace(/_/g, ' ')}</span>
+                                        <span className={count > 0 ? 'text-red-400' : 'text-white/30'}>{count}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </CardContent>
+                    </Card>
+                )}
 
                 {/* Compliance Status */}
                 <Card className="bg-[#0D1117] border-white/5 lg:col-span-2">
