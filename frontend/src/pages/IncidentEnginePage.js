@@ -112,6 +112,21 @@ export const IncidentEnginePage = () => {
         } catch (e) { toast.error(e.message); }
     };
 
+    const findMostCritical = async () => {
+        try {
+            const res = await fetch(`${API_URL}/api/incident-engine/most-critical`, { headers: headers() });
+            if (res.ok) {
+                const incident = await res.json();
+                setActiveTab('active');
+                await fetchIncidents();
+                setExpandedId(incident.id);
+                toast.success(`Most critical: ${incident.title}`);
+            } else {
+                toast.info('No active incidents found');
+            }
+        } catch (e) { toast.error(e.message); }
+    };
+
     const seedIncidents = async () => {
         try {
             const res = await fetch(`${API_URL}/api/seed/incidents`, {
@@ -136,6 +151,10 @@ export const IncidentEnginePage = () => {
                     <p className="text-sm text-[#A3A3A3]">Alert correlation, RCA, and incident lifecycle</p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <Button data-testid="find-critical-btn" variant="outline" size="sm" onClick={findMostCritical}
+                        className="border-violet-500/30 text-violet-400 hover:bg-violet-500/10">
+                        <Target className="h-4 w-4 mr-1" /> Find Most Critical
+                    </Button>
                     <Button data-testid="auto-correlate-btn" variant="outline" size="sm" onClick={autoCorrelate}
                         className="border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10">
                         <Brain className="h-4 w-4 mr-1" /> Auto-Correlate
@@ -287,6 +306,97 @@ const AIRecommendationCard = ({ incidentId, token }) => {
     );
 };
 
+// Collapsible multi-agent RCA chain trace: Root Cause Agent -> Root Cause Details
+// Agent -> Data Analysis Agent -> Synthesis. Distinct from AIRecommendationCard's
+// single-shot recommendation — this renders each step's own evidence separately.
+const RcaChainPanel = ({ incidentId, token }) => {
+    const [trace, setTrace] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [running, setRunning] = useState(false);
+    const [expandedSteps, setExpandedSteps] = useState({});
+
+    const load = useCallback(async () => {
+        setLoading(true);
+        try {
+            const res = await fetch(`${API_URL}/api/incident-engine/${incidentId}/rca-chain`, {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setTrace(data.rca_chain_trace || null);
+            }
+        } catch (e) { /* best-effort */ }
+        setLoading(false);
+    }, [incidentId, token]);
+
+    useEffect(() => { load(); }, [load]);
+
+    const run = async () => {
+        setRunning(true);
+        try {
+            const res = await fetch(`${API_URL}/api/incident-engine/${incidentId}/rca-chain`, {
+                method: 'POST', headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                const data = await res.json();
+                setTrace(data.rca_chain_trace || null);
+                toast.success('RCA chain complete');
+            } else {
+                toast.error('RCA chain failed');
+            }
+        } catch (e) { toast.error(e.message); }
+        setRunning(false);
+    };
+
+    const toggleStep = (i) => setExpandedSteps((s) => ({ ...s, [i]: !s[i] }));
+
+    return (
+        <div className="bg-[#121212] border border-violet-500/20 rounded-lg p-3 space-y-2">
+            <div className="flex items-center justify-between">
+                <p className="text-xs text-violet-400 font-[Barlow_Condensed] uppercase tracking-wider flex items-center gap-1">
+                    <Target className="h-3 w-3" /> Multi-Agent RCA Chain
+                </p>
+                <Button size="sm" variant="outline" onClick={run} disabled={running}
+                    data-testid={`run-rca-chain-${incidentId}`}
+                    className="text-[10px] h-6 border-violet-500/30 text-violet-300 hover:bg-violet-500/10">
+                    {running ? <RefreshCw className="h-3 w-3 mr-1 animate-spin" /> : <Brain className="h-3 w-3 mr-1" />}
+                    {running ? 'Running chain...' : trace ? 'Re-run chain' : 'Run RCA chain'}
+                </Button>
+            </div>
+
+            {loading ? (
+                <p className="text-xs text-[#525252]">Loading...</p>
+            ) : !trace ? (
+                <p className="text-xs text-[#525252]">No RCA chain run yet for this incident.</p>
+            ) : (
+                <div className="space-y-1.5">
+                    {trace.map((step, i) => (
+                        <div key={i} className="bg-[#0A0A0A] rounded border border-[#1F1F1F]">
+                            <button
+                                onClick={() => toggleStep(i)}
+                                className="w-full flex items-center justify-between p-2 text-left"
+                                data-testid={`rca-chain-step-${incidentId}-${i}`}
+                            >
+                                <span className="flex items-center gap-2 text-xs text-white">
+                                    {expandedSteps[i] ? <ChevronDown className="h-3 w-3 text-[#525252]" /> : <ChevronRight className="h-3 w-3 text-[#525252]" />}
+                                    {step.agent_name}
+                                </span>
+                                <span className="flex items-center gap-2 text-[10px] text-[#525252]">
+                                    {step.confidence != null && <span>conf {Math.round(step.confidence * 100)}%</span>}
+                                    <span>{step.duration_ms}ms</span>
+                                </span>
+                            </button>
+                            {expandedSteps[i] && (
+                                <div className="px-2 pb-2 text-xs text-[#A3A3A3]">{step.summary}</div>
+                            )}
+                        </div>
+                    ))}
+                </div>
+            )}
+        </div>
+    );
+};
+
 const StatCard = ({ label, value, icon: Icon, color, subtext }) => (
     <Card className="bg-[#0A0A0A] border-[#1F1F1F]">
         <CardContent className="p-4">
@@ -386,10 +496,20 @@ const IncidentList = ({ incidents, loading, expandedId, setExpandedId, onUpdateS
                                     {/* Autonomous AI Recommendation */}
                                     <AIRecommendationCard incidentId={incident.id} token={token} />
 
+                                    {/* Multi-Agent RCA Chain */}
+                                    <RcaChainPanel incidentId={incident.id} token={token} />
+
                                     {/* Root Cause */}
                                     {incident.root_cause && (
                                         <div className="bg-[#121212] border border-cyan-500/20 rounded-lg p-3">
-                                            <p className="text-xs text-cyan-400 font-[Barlow_Condensed] uppercase tracking-wider mb-1">Root Cause Analysis</p>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <p className="text-xs text-cyan-400 font-[Barlow_Condensed] uppercase tracking-wider">Root Cause Analysis</p>
+                                                {incident.root_cause_entity?.name && (
+                                                    <Badge className="text-[9px] bg-cyan-500/10 text-cyan-300 border border-cyan-500/30">
+                                                        entity: {incident.root_cause_entity.name} ({Math.round((incident.root_cause_entity.confidence || 0) * 100)}%)
+                                                    </Badge>
+                                                )}
+                                            </div>
                                             <p className="text-sm text-white">{incident.root_cause}</p>
                                             {incident.root_cause_analysis?.remediation && (
                                                 <div className="mt-2">

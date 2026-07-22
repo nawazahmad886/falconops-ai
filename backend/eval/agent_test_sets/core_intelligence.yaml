@@ -1,0 +1,31 @@
+# FalconOps AI - Core Intelligence agent evaluation test set
+# Each case is run through intelligence_agents_service.ask() (target: ask) or a
+# specialized security agent (target: security_agent:<agent_id>), and scored against
+# `expected` — see agent_eval_service.py for the scoring logic. All fields under
+# `expected` are optional; omit any that don't apply to a given question.
+
+- question: "What is the most critical active incident right now?"
+  target: ask
+  expected:
+    min_confidence: 0.2
+
+- question: "Show me recent error logs across all services in the last hour"
+  target: ask
+  expected:
+    expected_tools: ["get_logs"]
+    min_confidence: 0.2
+
+- question: "Are there any slow traces in the last hour?"
+  target: ask
+  expected:
+    expected_tools: ["get_traces"]
+
+- question: "Have there been any recent deployments?"
+  target: ask
+  expected:
+    expected_tools: ["get_deployments"]
+
+- question: "Investigate any signs of credential compromise or insider threat"
+  target: "security_agent:identity"
+  expected:
+    min_confidence: 0.0

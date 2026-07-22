@@ -350,6 +350,151 @@ const ServiceMap = ({ hours, onDiagnose }) => {
     );
 };
 
+// ───────── Service Correlation Panel (node click drill-down) ─────────
+// Shows the clicked service's own latency/error%, its real upstream/downstream
+// dependencies, and recent traces through it — picking one of those traces reuses the
+// existing TraceDetail component to render the actual source→...→destination span
+// waterfall through the backend.
+const ServiceCorrelationPanel = ({ service, hours, onClose, onDiagnose, onSelectTrace }) => {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        let alive = true;
+        setLoading(true);
+        const clampedHours = Math.min(168, Math.max(1, Math.ceil(hours)));
+        fetch(`${API}/api/traces/services/${encodeURIComponent(service)}/correlation?hours=${clampedHours}`, { headers: authHeaders() })
+            .then((r) => r.json())
+            .then((d) => { if (alive) { setData(d); setLoading(false); } })
+            .catch(() => alive && setLoading(false));
+        return () => { alive = false; };
+    }, [service, hours]);
+
+    if (loading) {
+        return (
+            <Card className="bg-black/60 border-white/10" data-testid="correlation-loading">
+                <CardContent className="p-8 flex items-center justify-center">
+                    <RefreshCw className="w-5 h-5 text-white/40 animate-spin" />
+                </CardContent>
+            </Card>
+        );
+    }
+    if (!data) return null;
+
+    const m = data.node_metrics || {};
+    const isHighError = (m.error_rate_pct || 0) > 5;
+
+    return (
+        <Card className="bg-black/60 border-white/10" data-testid="correlation-panel">
+            <CardContent className="p-5 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <Server className="w-4 h-4 text-cyan-400 shrink-0" />
+                            <span className="text-base font-semibold text-white truncate">{data.service}</span>
+                            <Badge className={`text-[10px] border ${isHighError ? 'bg-red-500/15 text-red-400 border-red-500/30' : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'}`}>
+                                {m.error_rate_pct ?? 0}% error rate
+                            </Badge>
+                        </div>
+                        <div className="text-[11px] text-white/50 mt-1">
+                            {m.call_count ?? 0} spans · {Math.round(m.avg_latency_ms || 0)}ms avg · p95 {Math.round(m.p95_latency_ms || 0)}ms
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                        <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => onDiagnose(data.service)}
+                            className="bg-violet-500/[0.08] border-violet-500/30 text-violet-200 hover:bg-violet-500/[0.16]"
+                            data-testid="correlation-diagnose-btn"
+                        >
+                            <Brain className="w-4 h-4 mr-1.5" />
+                            Diagnose
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={onClose} data-testid="close-correlation-panel">
+                            <XCircle className="w-4 h-4" />
+                        </Button>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                    <div>
+                        <div className="text-[10px] uppercase tracking-widest text-white/40 mb-1.5">
+                            Upstream · calls into {data.service}
+                        </div>
+                        <div className="space-y-1">
+                            {(data.upstream || []).length === 0 && (
+                                <div className="text-[11px] text-white/30">None observed</div>
+                            )}
+                            {(data.upstream || []).map((e, i) => (
+                                <div key={i} className="flex items-center gap-1.5 text-[11px] text-white/70 p-1.5 rounded bg-white/[0.02]">
+                                    <span className="truncate">{e.service}</span>
+                                    <ArrowRight className="w-3 h-3 text-white/30 shrink-0" />
+                                    <span className="text-white/50 truncate">{data.service}</span>
+                                    {e.error_count > 0 && (
+                                        <Badge className="ml-auto text-[9px] bg-red-500/15 text-red-400 border-red-500/30 shrink-0">
+                                            {e.error_count} err
+                                        </Badge>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                    <div>
+                        <div className="text-[10px] uppercase tracking-widest text-white/40 mb-1.5">
+                            Downstream · {data.service} calls
+                        </div>
+                        <div className="space-y-1">
+                            {(data.downstream || []).length === 0 && (
+                                <div className="text-[11px] text-white/30">None observed</div>
+                            )}
+                            {(data.downstream || []).map((e, i) => (
+                                <div key={i} className="flex items-center gap-1.5 text-[11px] text-white/70 p-1.5 rounded bg-white/[0.02]">
+                                    <span className="text-white/50 truncate">{data.service}</span>
+                                    <ArrowRight className="w-3 h-3 text-white/30 shrink-0" />
+                                    <span className="truncate">{e.depends_on}</span>
+                                    {e.error_count > 0 && (
+                                        <Badge className="ml-auto text-[9px] bg-red-500/15 text-red-400 border-red-500/30 shrink-0">
+                                            {e.error_count} err
+                                        </Badge>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <div className="text-[10px] uppercase tracking-widest text-white/40 mb-1.5">
+                        Recent traces through {data.service} ({(data.recent_traces || []).length})
+                    </div>
+                    <div className="space-y-1 max-h-[240px] overflow-y-auto pr-1">
+                        {(data.recent_traces || []).length === 0 && (
+                            <div className="text-[11px] text-white/30">No traces in this window.</div>
+                        )}
+                        {(data.recent_traces || []).map((t) => (
+                            <button
+                                key={t.trace_id}
+                                onClick={() => onSelectTrace(t)}
+                                className="w-full text-left flex items-center gap-2 text-[11px] p-2 rounded bg-black/30 border border-white/5 hover:border-cyan-500/30 hover:bg-white/[0.03]"
+                                data-testid={`correlation-trace-${t.trace_id}`}
+                            >
+                                {t.status === 'ERROR' ? (
+                                    <XCircle className="w-3 h-3 text-red-400 shrink-0" />
+                                ) : (
+                                    <CheckCircle2 className="w-3 h-3 text-emerald-400 shrink-0" />
+                                )}
+                                <span className="truncate flex-1">{t.root_service} → {t.root_operation}</span>
+                                <span className="text-white/40 tabular-nums shrink-0">{(t.duration_ms || 0).toFixed(0)}ms</span>
+                            </button>
+                        ))}
+                    </div>
+                </div>
+            </CardContent>
+        </Card>
+    );
+};
+
 // ───────── Main Page ─────────
 export default function APMTracesPage() {
     const [stats, setStats] = useState({});
@@ -362,7 +507,7 @@ export default function APMTracesPage() {
     const [selectedTrace, setSelectedTrace] = useState(null);
     const [diagnoseService, setDiagnoseService] = useState(null);
     const [loading, setLoading] = useState(true);
-    const [showMap, setShowMap] = useState(false);
+    const [mapSelectedService, setMapSelectedService] = useState(null);
     const [anomalyReport, setAnomalyReport] = useState(null);
     const [anomalyBusy, setAnomalyBusy] = useState(false);
 
@@ -438,10 +583,6 @@ export default function APMTracesPage() {
                         {anomalyBusy ? <RefreshCw className="w-4 h-4 mr-1.5 animate-spin" /> : <FileSearch className="w-4 h-4 mr-1.5" />}
                         Anomaly Report
                     </Button>
-                    <Button variant="outline" size="sm" onClick={() => setShowMap(!showMap)} data-testid="toggle-service-map">
-                        <Network className="w-4 h-4 mr-1.5" />
-                        {showMap ? 'Hide' : 'Show'} Service Map
-                    </Button>
                     <Button variant="outline" size="sm" onClick={reload} disabled={loading} data-testid="refresh-traces">
                         <RefreshCw className={`w-4 h-4 mr-1.5 ${loading ? 'animate-spin' : ''}`} />
                         Refresh
@@ -452,6 +593,7 @@ export default function APMTracesPage() {
             <Tabs defaultValue="traces" data-testid="apm-tabs">
                 <TabsList className="bg-black/40 border border-white/10">
                     <TabsTrigger value="traces" data-testid="tab-traces"><Layers className="w-3.5 h-3.5 mr-1.5" /> Traces</TabsTrigger>
+                    <TabsTrigger value="servicemap" data-testid="tab-servicemap"><Network className="w-3.5 h-3.5 mr-1.5" /> Service Map</TabsTrigger>
                     <TabsTrigger value="alerts" data-testid="tab-alerts"><Bell className="w-3.5 h-3.5 mr-1.5" /> Alert Rules</TabsTrigger>
                 </TabsList>
 
@@ -531,18 +673,6 @@ export default function APMTracesPage() {
                     hours={Math.max(1, Math.ceil(hours))}
                     onClose={() => setDiagnoseService(null)}
                 />
-            )}
-
-            {/* Service Map */}
-            {showMap && (
-                <Card className="bg-black/40 border-white/10" data-testid="service-map-card">
-                    <CardContent className="p-5">
-                        <div className="text-xs uppercase tracking-widest text-white/50 mb-3 flex items-center gap-1.5">
-                            <Network className="w-3.5 h-3.5" /> Auto-Built Service Dependencies
-                        </div>
-                        <ServiceMap hours={hours} onDiagnose={(s) => setDiagnoseService(s)} />
-                    </CardContent>
-                </Card>
             )}
 
             {/* Filters */}
@@ -675,6 +805,57 @@ export default function APMTracesPage() {
                     )}
                 </div>
             </div>
+                </TabsContent>
+
+                <TabsContent value="servicemap" className="space-y-4 mt-5">
+                    <Card className="bg-black/40 border-white/10" data-testid="service-map-card">
+                        <CardContent className="p-5">
+                            <div className="flex items-center justify-between mb-3">
+                                <div className="text-xs uppercase tracking-widest text-white/50 flex items-center gap-1.5">
+                                    <Network className="w-3.5 h-3.5" /> Service Dependency Map · real traces, last {hours >= 24 ? `${Math.round(hours / 24)}d` : `${hours}h`}
+                                </div>
+                                <div className="flex items-center gap-1 bg-black/40 rounded-lg border border-white/10 p-0.5">
+                                    {RANGES.map((r) => (
+                                        <button
+                                            key={r.label}
+                                            onClick={() => setHours(r.hours)}
+                                            className={`px-2.5 py-1 text-[11px] rounded ${hours === r.hours ? 'bg-cyan-500/20 text-cyan-300' : 'text-white/60 hover:text-white/90'}`}
+                                            data-testid={`map-range-${r.label}`}
+                                        >
+                                            {r.label}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            <ServiceMap hours={hours} onDiagnose={(s) => { setMapSelectedService(s); setSelectedTrace(null); }} />
+                        </CardContent>
+                    </Card>
+
+                    {mapSelectedService && (
+                        <ServiceCorrelationPanel
+                            service={mapSelectedService}
+                            hours={hours}
+                            onClose={() => setMapSelectedService(null)}
+                            onDiagnose={(s) => setDiagnoseService(s)}
+                            onSelectTrace={(t) => setSelectedTrace(t)}
+                        />
+                    )}
+
+                    {diagnoseService && (
+                        <AIOpsDiagnosePanel
+                            service={diagnoseService}
+                            hours={Math.max(1, Math.ceil(hours))}
+                            onClose={() => setDiagnoseService(null)}
+                        />
+                    )}
+
+                    {selectedTrace && (
+                        <TraceDetail
+                            trace={selectedTrace}
+                            onClose={() => setSelectedTrace(null)}
+                            onDiagnose={(s) => setDiagnoseService(s)}
+                        />
+                    )}
                 </TabsContent>
 
                 <TabsContent value="alerts" className="mt-5">

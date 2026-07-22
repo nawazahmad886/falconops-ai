@@ -17,10 +17,11 @@ const colorFor = (name, names = []) => {
  * D3 force-directed service dependency map.
  *
  * Props:
- *   nodes: [{id, name, callCount, errorCount}]   OR a list of strings (raw service names)
+ *   nodes: [{name, call_count, error_count, error_rate_pct, avg_latency_ms, p95_latency_ms}]
+ *          OR a list of strings (raw service names) — both forms still supported.
  *   edges: [{service, depends_on, call_count, error_count}]
  *   height: number (px, default 480)
- *   onNodeClick: (serviceName) => void  — for "Diagnose this service" CTA
+ *   onNodeClick: (serviceName) => void  — for the correlation drill-down panel
  */
 export default function ForceServiceMap({ nodes, edges, height = 480, onNodeClick }) {
     const svgRef = useRef(null);
@@ -33,15 +34,21 @@ export default function ForceServiceMap({ nodes, edges, height = 480, onNodeClic
         const aggMap = new Map();
         const bumpNode = (name) => {
             if (!name) return null;
-            if (!aggMap.has(name)) aggMap.set(name, { id: name, name, callCount: 0, errorCount: 0 });
+            if (!aggMap.has(name)) aggMap.set(name, {
+                id: name, name, callCount: 0, errorCount: 0,
+                avgLatencyMs: null, p95LatencyMs: null, errorRatePct: null,
+            });
             return aggMap.get(name);
         };
         (nodes || []).forEach((n) => {
             if (typeof n === 'string') bumpNode(n);
             else if (n && n.name) {
                 const x = bumpNode(n.name);
-                x.callCount += n.callCount || 0;
-                x.errorCount += n.errorCount || 0;
+                x.callCount += n.callCount || n.call_count || 0;
+                x.errorCount += n.errorCount || n.error_count || 0;
+                if (n.avg_latency_ms != null) x.avgLatencyMs = n.avg_latency_ms;
+                if (n.p95_latency_ms != null) x.p95LatencyMs = n.p95_latency_ms;
+                if (n.error_rate_pct != null) x.errorRatePct = n.error_rate_pct;
             }
         });
         (edges || []).forEach((e) => {
@@ -190,7 +197,7 @@ export default function ForceServiceMap({ nodes, edges, height = 480, onNodeClic
             .attr('stroke-width', 1.5)
             .style('animation', 'falcon-pulse 1.6s ease-out infinite');
 
-        // Label
+        // Label — service name
         node.append('text')
             .text((d) => d.name)
             .attr('font-size', 11)
@@ -198,6 +205,18 @@ export default function ForceServiceMap({ nodes, edges, height = 480, onNodeClic
             .attr('fill', '#fff')
             .attr('text-anchor', 'middle')
             .attr('dy', (d) => -radiusOf(d) - 6)
+            .style('pointer-events', 'none')
+            .style('text-shadow', '0 1px 3px rgba(0,0,0,0.9)');
+
+        // Sub-label — latency + error% (only when the backend supplied real metrics)
+        node.filter((d) => d.avgLatencyMs != null)
+            .append('text')
+            .text((d) => `${Math.round(d.avgLatencyMs)}ms${d.errorRatePct > 0 ? ` · ${d.errorRatePct}% err` : ''}`)
+            .attr('font-size', 9)
+            .attr('font-weight', 500)
+            .attr('fill', (d) => (d.errorRatePct > 5 ? '#fca5a5' : 'rgba(255,255,255,0.55)'))
+            .attr('text-anchor', 'middle')
+            .attr('dy', (d) => -radiusOf(d) - 18)
             .style('pointer-events', 'none')
             .style('text-shadow', '0 1px 3px rgba(0,0,0,0.9)');
 
@@ -254,9 +273,18 @@ export default function ForceServiceMap({ nodes, edges, height = 480, onNodeClic
                     <div className="text-[11px] text-white/60 space-y-0.5">
                         <div>Calls: <span className="text-white/80 font-mono">{hovered.callCount}</span></div>
                         <div>Errors: <span className={hovered.errorCount > 0 ? 'text-red-400 font-mono' : 'text-white/80 font-mono'}>{hovered.errorCount}</span></div>
+                        {hovered.avgLatencyMs != null && (
+                            <div>Avg latency: <span className="text-white/80 font-mono">{Math.round(hovered.avgLatencyMs)}ms</span></div>
+                        )}
+                        {hovered.p95LatencyMs != null && (
+                            <div>p95 latency: <span className="text-white/80 font-mono">{Math.round(hovered.p95LatencyMs)}ms</span></div>
+                        )}
+                        {hovered.errorRatePct != null && (
+                            <div>Error rate: <span className={hovered.errorRatePct > 5 ? 'text-red-400 font-mono' : 'text-white/80 font-mono'}>{hovered.errorRatePct}%</span></div>
+                        )}
                     </div>
                     <Badge className="mt-1.5 text-[9px] bg-violet-500/15 text-violet-300 border border-violet-500/30">
-                        click → AI diagnose
+                        click → correlation & diagnose
                     </Badge>
                 </div>
             )}

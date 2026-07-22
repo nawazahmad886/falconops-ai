@@ -22,7 +22,8 @@ import {
     Play,
     Settings,
     ArrowRight,
-    Sparkles
+    Sparkles,
+    MessageSquareText
 } from 'lucide-react';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -301,6 +302,129 @@ const getUseCases = (techId) => {
     return useCases[techId] || [];
 };
 
+// Ask FalconOps — a plain-English question box wired to the real NL->tool-call
+// planner already running in the backend (intelligence_agents_service.ask(), exposed
+// at POST /api/ai-intelligence/ask). No new query language is invented here; this is
+// just the first frontend surface for a capability that already worked.
+const AskFalconOps = () => {
+    const [query, setQuery] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [result, setResult] = useState(null);
+    const [error, setError] = useState(null);
+
+    const ask = async () => {
+        if (!query.trim()) return;
+        setLoading(true);
+        setError(null);
+        setResult(null);
+        try {
+            const token = localStorage.getItem('token');
+            const response = await fetch(`${API_URL}/api/ai-intelligence/ask`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ query, mode: 'auto' }),
+            });
+            if (response.ok) {
+                setResult(await response.json());
+            } else {
+                setError('Failed to get an answer. Please try again.');
+            }
+        } catch (e) {
+            setError(e.message);
+        }
+        setLoading(false);
+    };
+
+    const sampleQuestions = [
+        'What is the most critical active incident right now?',
+        'Show me recent errors in the payment service',
+        'Are there any slow traces in the last hour?',
+    ];
+
+    return (
+        <div className="bg-gradient-to-br from-[#0D1117] to-[#161B22] border border-white/10 rounded-xl p-6">
+            <div className="flex items-center gap-3 mb-4">
+                <MessageSquareText className="w-6 h-6 text-[#00E0FF]" />
+                <div>
+                    <h2 className="text-xl font-semibold text-white">Ask FalconOps</h2>
+                    <p className="text-sm text-white/50">Ask a plain-English question about your logs, metrics, traces, or incidents</p>
+                </div>
+            </div>
+
+            <div className="flex gap-2 mb-3">
+                <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && ask()}
+                    placeholder="e.g. Show me errors in payment-service in the last hour"
+                    className="flex-1 bg-white/5 border border-white/10 rounded-lg px-4 py-2.5 text-sm text-white placeholder:text-white/30 focus:outline-none focus:border-[#F5B841]/50"
+                    data-testid="ask-falconops-input"
+                />
+                <Button onClick={ask} disabled={loading || !query.trim()} className="bg-[#F5B841] text-black hover:bg-[#F5B841]/90" data-testid="ask-falconops-submit">
+                    {loading ? 'Asking...' : 'Ask'}
+                </Button>
+            </div>
+
+            <div className="flex flex-wrap gap-2 mb-4">
+                {sampleQuestions.map((q, i) => (
+                    <button key={i} onClick={() => setQuery(q)} className="text-xs px-2.5 py-1 bg-white/5 rounded-full text-white/50 hover:text-white/80 hover:bg-white/10">
+                        {q}
+                    </button>
+                ))}
+            </div>
+
+            {error && <p className="text-sm text-red-400" data-testid="ask-falconops-error">{error}</p>}
+
+            {result && (
+                <div className="bg-black/30 border border-white/10 rounded-lg p-4 space-y-3" data-testid="ask-falconops-result">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {result.mode && (
+                            <span className="text-[10px] px-2 py-0.5 bg-[#00E0FF]/10 text-[#00E0FF] rounded border border-[#00E0FF]/20">
+                                {result.mode === 'incident' ? 'Incident Analysis Agent' : 'Monitoring Copilot Agent'}
+                            </span>
+                        )}
+                        {result.confidence != null && (
+                            <span className="text-[10px] px-2 py-0.5 bg-white/5 text-white/60 rounded border border-white/10">
+                                confidence {Math.round(result.confidence * 100)}%
+                            </span>
+                        )}
+                        {(result.tool_trace || []).map((t, i) => (
+                            <span key={i} className="text-[10px] px-2 py-0.5 bg-white/5 text-white/40 rounded border border-white/10">
+                                {t.tool}
+                            </span>
+                        ))}
+                    </div>
+                    <p className="text-sm text-white/90">{result.summary}</p>
+                    {result.evidence?.length > 0 && (
+                        <div>
+                            <p className="text-xs text-white/40 uppercase tracking-wider mb-1">Evidence</p>
+                            <ul className="space-y-1">
+                                {result.evidence.map((e, i) => (
+                                    <li key={i} className="text-xs text-white/60 flex items-start gap-1.5">
+                                        <span className="text-[#F5B841] mt-0.5">•</span>{e}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    {result.recommended_actions?.length > 0 && (
+                        <div>
+                            <p className="text-xs text-white/40 uppercase tracking-wider mb-1">Recommended Actions</p>
+                            <ul className="space-y-1">
+                                {result.recommended_actions.map((a, i) => (
+                                    <li key={i} className="text-xs text-white/70 flex items-start gap-1.5">
+                                        <ArrowRight className="w-3 h-3 text-[#00E0FF] mt-0.5 shrink-0" />{a}
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 export const IntelligencePage = () => {
     const [selectedTech, setSelectedTech] = useState(null);
     const [stats, setStats] = useState({
@@ -403,6 +527,9 @@ export const IntelligencePage = () => {
                         </div>
                     </div>
                 </div>
+
+                {/* Ask FalconOps — natural language query */}
+                <AskFalconOps />
 
                 {/* Quick Actions */}
                 <div>

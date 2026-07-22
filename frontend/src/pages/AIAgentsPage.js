@@ -46,6 +46,10 @@ export default function AIAgentsPage() {
     const [pipelineStats, setPipelineStats] = useState(null);
     const [toggling, setToggling] = useState(false);
     const [simulating, setSimulating] = useState(false);
+    // Eval state
+    const [evalTestSets, setEvalTestSets] = useState([]);
+    const [evalHistory, setEvalHistory] = useState([]);
+    const [evalRunning, setEvalRunning] = useState(null);
 
     const fetchData = useCallback(async () => {
         setLoading(true);
@@ -75,6 +79,25 @@ export default function AIAgentsPage() {
             setPipelineStats(sRes.data);
         } catch (e) { console.error(e); }
     }, [api]);
+
+    const fetchEval = useCallback(async () => {
+        try {
+            const [tRes, hRes] = await Promise.all([
+                api.get('/agent-eval/test-sets'), api.get('/agent-eval/history?limit=20'),
+            ]);
+            setEvalTestSets(tRes.data?.test_sets || []);
+            setEvalHistory(hRes.data?.runs || []);
+        } catch (e) { console.error(e); }
+    }, [api]);
+
+    const runEvalTestSet = useCallback(async (name) => {
+        setEvalRunning(name);
+        try {
+            await api.post(`/agent-eval/run/${name}`);
+            await fetchEval();
+        } catch (e) { console.error(e); }
+        setEvalRunning(null);
+    }, [api, fetchEval]);
 
     const runAnalysis = useCallback(async () => {
         if (!inputData.trim()) return;
@@ -134,6 +157,7 @@ export default function AIAgentsPage() {
     useEffect(() => { fetchData(); }, [fetchData]);
     useEffect(() => { if (tab === 'memory') fetchMemory(); }, [tab, fetchMemory]);
     useEffect(() => { if (tab === 'pipeline') fetchPipeline(); }, [tab, fetchPipeline]);
+    useEffect(() => { if (tab === 'eval') fetchEval(); }, [tab, fetchEval]);
 
     const sampleIncidents = [
         { label: 'API Gateway 502', data: '{"alert":"API Gateway returning 502 errors","affected":"payment-service, user-service","duration":"15 minutes","error_rate":"45%","region":"us-east"}' },
@@ -147,6 +171,7 @@ export default function AIAgentsPage() {
         { id: 'memory', label: 'Memory', icon: Database },
         { id: 'pipeline', label: 'Pipeline', icon: Workflow },
         { id: 'history', label: 'History', icon: History },
+        { id: 'eval', label: 'Eval', icon: CheckCircle },
         { id: 'config', label: 'Config', icon: Settings },
     ];
 
@@ -395,6 +420,74 @@ export default function AIAgentsPage() {
                         </div>
                     </CardContent>
                 </Card>
+            )}
+
+            {/* ======================== EVAL TAB ======================== */}
+            {/* Continuous agent evaluation: run a YAML test set (question + expectations)
+                through a real agent, score the resulting trajectory, and track pass/fail
+                + quality-score trend across runs over time. */}
+            {tab === 'eval' && (
+                <div className="space-y-4">
+                    <Card className="bg-[#0D1117] border-white/5">
+                        <CardHeader className="pb-3 border-b border-white/5">
+                            <CardTitle className="text-base flex items-center gap-2"><CheckCircle className="w-4 h-4 text-emerald-400" /> Test Sets</CardTitle>
+                        </CardHeader>
+                        <CardContent className="p-4">
+                            {evalTestSets.length === 0 ? (
+                                <div className="text-center py-6 text-white/40 text-sm" data-testid="no-test-sets">
+                                    No test sets found in backend/eval/agent_test_sets/.
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {evalTestSets.map((name) => (
+                                        <div key={name} className="flex items-center justify-between p-2.5 rounded-lg bg-white/[0.02] border border-white/5" data-testid={`test-set-${name}`}>
+                                            <span className="text-sm text-white/80 font-mono">{name}</span>
+                                            <Button
+                                                size="sm"
+                                                onClick={() => runEvalTestSet(name)}
+                                                disabled={evalRunning === name}
+                                                className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs"
+                                                data-testid={`run-test-set-${name}`}
+                                            >
+                                                {evalRunning === name ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />}
+                                                {evalRunning === name ? 'Running...' : 'Run'}
+                                            </Button>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </CardContent>
+                    </Card>
+
+                    <Card className="bg-[#0D1117] border-white/5">
+                        <CardHeader className="pb-3 border-b border-white/5">
+                            <CardTitle className="text-base flex items-center gap-2"><BarChart3 className="w-4 h-4 text-white/60" /> Run History</CardTitle>
+                        </CardHeader>
+                        <CardContent className="p-0">
+                            <div className="max-h-[500px] overflow-y-auto divide-y divide-white/5" data-testid="eval-history-list">
+                                {evalHistory.length === 0 ? (
+                                    <div className="p-8 text-center text-white/40"><CheckCircle className="w-8 h-8 mx-auto mb-3 opacity-40" /><p>No eval runs yet — run a test set above.</p></div>
+                                ) : evalHistory.map((run) => {
+                                    const passRate = run.total_cases ? Math.round((run.passed / run.total_cases) * 100) : 0;
+                                    return (
+                                        <div key={run.run_id} className="p-3 hover:bg-white/[0.02]" data-testid={`eval-run-${run.run_id}`}>
+                                            <div className="flex items-center justify-between mb-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="text-xs text-white/70 font-mono">{run.test_set}</span>
+                                                    <Badge className={`text-[9px] border ${passRate >= 80 ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30' : passRate >= 50 ? 'bg-amber-500/15 text-amber-400 border-amber-500/30' : 'bg-red-500/15 text-red-400 border-red-500/30'}`}>
+                                                        {run.passed}/{run.total_cases} passed ({passRate}%)
+                                                    </Badge>
+                                                </div>
+                                                <span className="text-[10px] text-white/25">{run.created_at ? new Date(run.created_at).toLocaleString() : ''}</span>
+                                            </div>
+                                            <p className="text-[10px] text-white/40">{run.duration_ms}ms · run {run.run_id.slice(0, 8)}</p>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </CardContent>
+                    </Card>
+                </div>
             )}
 
             {/* ======================== CONFIG TAB ======================== */}

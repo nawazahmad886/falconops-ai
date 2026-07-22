@@ -463,9 +463,15 @@ class IncidentEngine:
         incidents = await db.incidents_engine.find(
             query, {"_id": 0}
         ).sort("priority_score", -1).to_list(100)
-        
+
         return incidents
-    
+
+    async def get_most_critical_incident(self, tenant_id: Optional[str] = None) -> Optional[Dict]:
+        """The single highest-priority active incident — reuses get_active_incidents'
+        existing priority_score sort rather than a new query; just takes the top one."""
+        active = await self.get_active_incidents(tenant_id=tenant_id)
+        return active[0] if active else None
+
     async def get_incident_stats(self, tenant_id: Optional[str] = None) -> Dict:
         """Get incident statistics"""
         query = {}

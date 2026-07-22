@@ -83,6 +83,7 @@ class IncidentResponse(BaseModel):
     alert_ids: List[str]
     ai_analysis: Optional[Dict[str, Any]] = None
     root_cause: Optional[str] = None
+    root_cause_entity: Optional[Dict[str, Any]] = None
     suggested_actions: Optional[List[str]] = None
     created_at: str
     updated_at: str

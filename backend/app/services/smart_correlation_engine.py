@@ -8,6 +8,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List
 from collections import defaultdict
 from ..core.database import db
+from .correlation_shared import multi_dimension_group
 
 
 class SmartCorrelationEngine:
@@ -49,8 +50,15 @@ class SmartCorrelationEngine:
             upstream[e["source_id"]].add(e["target_id"])
             downstream[e["target_id"]].add(e["source_id"])
 
-        # 3. Group alerts by multiple dimensions
-        groups = self._multi_dimension_group(alerts, service_map, upstream, downstream, service_id_map)
+        # 3. Group alerts by multiple dimensions (shared grouping logic — see
+        # correlation_shared.py; this engine only supplies its own field extraction for
+        # db.alerts_engine's schema and its own fixed confidence values, unchanged from
+        # before this was extracted).
+        groups = multi_dimension_group(
+            alerts, service_map, service_id_map, upstream, downstream,
+            get_service=self._get_service, get_host=self._get_host,
+            confidence_fn=self._confidence_fn,
+        )
 
         # 4. Create incidents from groups
         created = []
@@ -104,6 +112,7 @@ class SmartCorrelationEngine:
                 "is_sla_breached": False,
                 "correlation_confidence": group.get("confidence", 0.7),
                 "correlation_type": group["type"],
+                "root_cause_entity": group.get("root_cause_entity"),
             }
             await db.incidents_engine.insert_one(incident_doc)
             await db.alerts_engine.update_many({"id": {"$in": alert_ids}}, {"$set": {"incident_id": incident_id}})
@@ -130,94 +139,24 @@ class SmartCorrelationEngine:
             "correlation_details": details,
         }
 
-    def _multi_dimension_group(self, alerts, service_map, upstream, downstream, service_id_map):
-        """Group alerts by host, service, topology dependency, and metric pattern."""
-        groups = []
-        used = set()
+    # Field extraction + confidence scoring for this engine's schema (db.alerts_engine:
+    # entity_name/tags.host rather than legacy db.alerts' top-level service/host) — the
+    # actual grouping loop now lives in correlation_shared.multi_dimension_group,
+    # shared with ai_correlation.py. Confidence values unchanged from before extraction.
 
-        # --- Topology-based: alerts on services that share a dependency chain ---
-        service_alerts = defaultdict(list)
-        for a in alerts:
-            svc = a.get("entity_name") or a.get("tags", {}).get("service")
-            if svc and svc in service_map:
-                service_alerts[svc].append(a)
+    def _get_service(self, a: Dict) -> Optional[str]:
+        return a.get("entity_name") or a.get("tags", {}).get("service")
 
-        for svc, svc_alerts in service_alerts.items():
-            node = service_map.get(svc)
-            if not node:
-                continue
-            # Find sibling services sharing same upstream dep
-            for dep_id in upstream.get(node["id"], set()):
-                dep_node = service_id_map.get(dep_id)
-                if not dep_node:
-                    continue
-                siblings = [sid for sid in downstream.get(dep_id, set()) if sid != node["id"]]
-                for sib_id in siblings:
-                    sib_node = service_id_map.get(sib_id)
-                    if sib_node and sib_node["name"] in service_alerts:
-                        combined = svc_alerts + service_alerts[sib_node["name"]]
-                        ids = frozenset(a["id"] for a in combined)
-                        if ids not in used and len(combined) >= 2:
-                            used.add(ids)
-                            groups.append({
-                                "type": "topology_dependency",
-                                "reason": f"Shared dependency: {dep_node['name']} affects {svc}, {sib_node['name']}",
-                                "alerts": combined,
-                                "confidence": 0.85,
-                            })
+    def _get_host(self, a: Dict) -> Optional[str]:
+        return a.get("tags", {}).get("host") or a.get("entity_id")
 
-        # --- Host-based grouping ---
-        host_groups = defaultdict(list)
-        for a in alerts:
-            host = a.get("tags", {}).get("host") or a.get("entity_id")
-            if host:
-                host_groups[host].append(a)
-        for host, h_alerts in host_groups.items():
-            if len(h_alerts) >= 2:
-                ids = frozenset(a["id"] for a in h_alerts)
-                if ids not in used:
-                    used.add(ids)
-                    groups.append({
-                        "type": "same_host",
-                        "reason": f"Multiple alerts on host {host}",
-                        "alerts": h_alerts,
-                        "confidence": 0.75,
-                    })
-
-        # --- Metric pattern: same metric spiking across hosts ---
-        metric_groups = defaultdict(list)
-        for a in alerts:
-            mn = a.get("metric_name")
-            if mn:
-                metric_groups[mn].append(a)
-        for metric, m_alerts in metric_groups.items():
-            hosts_affected = {a.get("tags", {}).get("host") for a in m_alerts}
-            if len(hosts_affected) >= 2:
-                ids = frozenset(a["id"] for a in m_alerts)
-                if ids not in used:
-                    used.add(ids)
-                    groups.append({
-                        "type": "metric_pattern",
-                        "reason": f"{metric} anomaly across {len(hosts_affected)} hosts",
-                        "alerts": m_alerts,
-                        "confidence": 0.8,
-                    })
-
-        # --- Service-based fallback ---
-        for svc, svc_alerts in service_alerts.items():
-            if len(svc_alerts) >= 2:
-                ids = frozenset(a["id"] for a in svc_alerts)
-                if ids not in used:
-                    used.add(ids)
-                    groups.append({
-                        "type": "same_service",
-                        "reason": f"Multiple alerts on service {svc}",
-                        "alerts": svc_alerts,
-                        "confidence": 0.65,
-                    })
-
-        groups.sort(key=lambda g: g.get("confidence", 0), reverse=True)
-        return groups
+    def _confidence_fn(self, group_type: str, combined_alerts: List[Dict]) -> float:
+        return {
+            "topology_dependency": 0.85,
+            "same_host": 0.75,
+            "metric_pattern": 0.8,
+            "same_service": 0.65,
+        }.get(group_type, 0.7)
 
     def _priority_score(self, severity: str, affected_count: int) -> int:
         scores = {"sev1": 100, "sev2": 80, "sev3": 60, "sev4": 40, "sev5": 20}

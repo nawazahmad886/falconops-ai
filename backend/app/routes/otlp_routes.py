@@ -377,15 +377,92 @@ async def list_services(user: dict = Depends(require_auth)):
     return {"services": [s for s in services if s]}
 
 
+async def _service_latency_metrics(cutoff: str) -> Dict[str, Dict[str, Any]]:
+    """Per-service latency + error rate, grouped directly from real otel_spans in the
+    given window — same sorted-percentile style trace_rca_service.analyze_window uses
+    for (service, operation) groups, just rolled up per-service instead."""
+    spans = await db.otel_spans.find(
+        {"received_at": {"$gte": cutoff}},
+        {"_id": 0, "service": 1, "duration_ms": 1, "status": 1},
+    ).to_list(length=20000)
+
+    by_service: Dict[str, Dict[str, Any]] = {}
+    for s in spans:
+        name = s.get("service")
+        if not name:
+            continue
+        g = by_service.setdefault(name, {"durations": [], "errors": 0})
+        g["durations"].append(s.get("duration_ms") or 0)
+        if s.get("status") == "ERROR":
+            g["errors"] += 1
+
+    metrics: Dict[str, Dict[str, Any]] = {}
+    for name, g in by_service.items():
+        durations = sorted(g["durations"])
+        n = len(durations)
+        p95 = durations[max(0, int(n * 0.95) - 1)] if durations else 0
+        metrics[name] = {
+            "call_count": n,
+            "error_count": g["errors"],
+            "error_rate_pct": round((g["errors"] / n) * 100, 2) if n else 0,
+            "avg_latency_ms": round(sum(durations) / n, 2) if n else 0,
+            "p95_latency_ms": round(p95, 2),
+        }
+    return metrics
+
+
 @trace_router.get("/services/dependencies")
 async def list_dependencies(hours: int = Query(24, ge=1, le=168),
                             user: dict = Depends(require_auth)):
-    """Real service dependency graph auto-built from incoming trace parent/child spans."""
+    """Real service dependency graph auto-built from incoming trace parent/child spans,
+    with per-node latency/error% computed from real span durations in the same window —
+    powers the Service Map's node badges (previously call/error count only)."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     cursor = db.service_dependencies.find({"last_seen": {"$gte": cutoff}}, {"_id": 0})
     edges = await cursor.to_list(length=2000)
-    nodes = list({s for e in edges for s in (e.get("service"), e.get("depends_on")) if s})
+    node_names = {s for e in edges for s in (e.get("service"), e.get("depends_on")) if s}
+
+    node_metrics = await _service_latency_metrics(cutoff)
+    empty_metrics = {"call_count": 0, "error_count": 0, "error_rate_pct": 0,
+                      "avg_latency_ms": 0, "p95_latency_ms": 0}
+    nodes = [{"name": name, **node_metrics.get(name, empty_metrics)} for name in node_names]
+
     return {"nodes": nodes, "edges": edges, "node_count": len(nodes), "edge_count": len(edges)}
+
+
+@trace_router.get("/services/{service_name}/correlation")
+async def service_correlation(service_name: str, hours: int = Query(24, ge=1, le=168),
+                              user: dict = Depends(require_auth)):
+    """Drill-down for one service-map node: its own latency/error metrics, its real
+    upstream callers + downstream dependencies (from service_dependencies), and recent
+    traces that pass through it anywhere in their call chain — click one of those
+    traces and GET /api/traces/{trace_id} renders the actual source-to-destination
+    span waterfall through the backend."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+    upstream = await db.service_dependencies.find(
+        {"depends_on": service_name, "last_seen": {"$gte": cutoff}}, {"_id": 0}
+    ).to_list(length=200)
+    downstream = await db.service_dependencies.find(
+        {"service": service_name, "last_seen": {"$gte": cutoff}}, {"_id": 0}
+    ).to_list(length=200)
+
+    node_metrics = (await _service_latency_metrics(cutoff)).get(service_name, {
+        "call_count": 0, "error_count": 0, "error_rate_pct": 0,
+        "avg_latency_ms": 0, "p95_latency_ms": 0,
+    })
+
+    recent_traces = await db.otel_traces.find(
+        {"services": service_name, "received_at": {"$gte": cutoff}}, {"_id": 0}
+    ).sort("received_at", -1).limit(20).to_list(length=20)
+
+    return {
+        "service": service_name,
+        "node_metrics": node_metrics,
+        "upstream": upstream,
+        "downstream": downstream,
+        "recent_traces": recent_traces,
+    }
 
 
 @trace_router.get("/stats/summary")

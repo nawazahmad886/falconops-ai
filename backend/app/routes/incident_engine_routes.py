@@ -6,6 +6,7 @@ from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 
+from ..core.database import db
 from ..utils.auth import require_auth, require_write_access
 from ..services.incident_engine import incident_engine
 from ..services.rca_engine import rca_engine
@@ -67,6 +68,18 @@ async def get_active_incidents(current_user: dict = Depends(require_auth)):
         tenant_id=current_user.get("tenant_id")
     )
     return {"incidents": incidents, "total": len(incidents)}
+
+
+@router.get("/most-critical")
+async def get_most_critical_incident(current_user: dict = Depends(require_auth)):
+    """The single highest-priority active incident — powers the 'find & investigate
+    most critical problem' one-click flow."""
+    incident = await incident_engine.get_most_critical_incident(
+        tenant_id=current_user.get("tenant_id")
+    )
+    if not incident:
+        raise HTTPException(status_code=404, detail="No active incidents")
+    return incident
 
 
 @router.get("")
@@ -237,6 +250,39 @@ async def analyze_incident_rca(
     if result.get("error"):
         raise HTTPException(status_code=404, detail=result["error"])
     return result
+
+
+@router.post("/{incident_id}/rca-chain")
+async def run_rca_chain(
+    incident_id: str,
+    current_user: dict = Depends(require_auth)
+):
+    """Run the multi-agent RCA chain (Root Cause Agent -> Root Cause Details Agent ->
+    Data Analysis Agent -> Synthesis) against one incident and persist the step-by-step
+    trace. Distinct from /analyze-rca (a single-shot analysis) — this records each
+    step's own evidence so the frontend can render the progressive investigation."""
+    from ..services.rca_chain_service import run_rca_chain as _run_rca_chain
+    result = await _run_rca_chain(incident_id, tenant_id=current_user.get("tenant_id"))
+    if result.get("error"):
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+@router.get("/{incident_id}/rca-chain")
+async def get_rca_chain(
+    incident_id: str,
+    current_user: dict = Depends(require_auth)
+):
+    """Return the stored RCA chain trace for an incident, if one has been run."""
+    incident = await db.incidents_engine.find_one({"id": incident_id}, {"_id": 0}) \
+        or await db.incidents.find_one({"id": incident_id}, {"_id": 0})
+    if not incident:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    return {
+        "incident_id": incident_id,
+        "rca_chain_trace": incident.get("rca_chain_trace"),
+        "rca_chain_run_at": incident.get("rca_chain_run_at"),
+    }
 
 
 @router.get("/{incident_id}/recommendation")

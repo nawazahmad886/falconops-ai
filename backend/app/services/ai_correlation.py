@@ -13,6 +13,7 @@ from collections import defaultdict
 
 from ..core.database import db
 from .websocket_manager import ws_manager
+from .correlation_shared import multi_dimension_group
 
 logger = logging.getLogger(__name__)
 
@@ -146,119 +147,34 @@ async def _load_topology(tenant_id: Optional[str] = None):
 
 
 # ======================== REAL MULTI-DIMENSIONAL GROUPING ========================
+# Grouping logic itself now lives in correlation_shared.py (shared with
+# smart_correlation_engine.py) — this engine only supplies its own field extraction
+# (legacy db.alerts uses top-level service/host) and confidence formulas, preserving
+# its exact prior confidence values.
 
-def _multi_dimension_group(
-    alerts: List[Dict[str, Any]],
-    service_map: Dict[str, Any],
-    service_id_map: Dict[str, Any],
-    upstream: Dict[str, set],
-    downstream: Dict[str, set],
-) -> List[Dict[str, Any]]:
-    """
-    Group alerts by topology dependency, cross-host metric pattern, severity cascade,
-    same host, and same service. Each alert may appear in more than one candidate group;
-    the caller resolves overlaps by processing groups highest-confidence-first and
-    skipping alerts already claimed by a higher-confidence group.
-    """
-    groups: List[Dict[str, Any]] = []
-    seen_id_sets = set()
+def _get_service(a: Dict[str, Any]) -> Optional[str]:
+    return a.get("service")
 
-    service_alerts = defaultdict(list)
-    for a in alerts:
-        svc = a.get("service")
-        if svc:
-            service_alerts[svc].append(a)
 
-    # -- topology dependency: alerts on services sharing an upstream dependency --
-    for svc, svc_alerts in service_alerts.items():
-        node = service_map.get(svc)
-        if not node:
-            continue
-        for dep_id in upstream.get(node["id"], set()):
-            dep_node = service_id_map.get(dep_id)
-            if not dep_node:
-                continue
-            for sib_id in downstream.get(dep_id, set()):
-                if sib_id == node["id"]:
-                    continue
-                sib_node = service_id_map.get(sib_id)
-                if sib_node and sib_node["name"] in service_alerts:
-                    combined = svc_alerts + service_alerts[sib_node["name"]]
-                    ids = frozenset(a["id"] for a in combined)
-                    if ids not in seen_id_sets and len(combined) >= 2:
-                        seen_id_sets.add(ids)
-                        groups.append({
-                            "type": "topology_dependency",
-                            "reason": f"Shared dependency: {dep_node['name']} affects {svc} and {sib_node['name']}",
-                            "alerts": combined,
-                            "confidence": min(0.95, 0.75 + 0.05 * len(combined)),
-                        })
+def _get_host(a: Dict[str, Any]) -> Optional[str]:
+    return a.get("host")
 
-    # -- metric pattern: same metric alerting across >=2 hosts --
-    metric_groups = defaultdict(list)
-    for a in alerts:
-        mn = a.get("metric_name")
-        if mn:
-            metric_groups[mn].append(a)
-    for metric, m_alerts in metric_groups.items():
-        hosts_affected = {a.get("host") for a in m_alerts if a.get("host")}
-        if len(hosts_affected) >= 2:
-            ids = frozenset(a["id"] for a in m_alerts)
-            if ids not in seen_id_sets:
-                seen_id_sets.add(ids)
-                groups.append({
-                    "type": "metric_pattern",
-                    "reason": f"{metric} anomaly across {len(hosts_affected)} hosts",
-                    "alerts": m_alerts,
-                    "confidence": min(0.9, 0.7 + 0.05 * len(hosts_affected)),
-                })
 
-    # -- severity cascade: many distinct services alerting within the same window --
-    services_in_batch = {a.get("service") for a in alerts if a.get("service")}
-    if len(services_in_batch) >= 3:
-        ids = frozenset(a["id"] for a in alerts)
-        if ids not in seen_id_sets:
-            seen_id_sets.add(ids)
-            groups.append({
-                "type": "severity_cascade",
-                "reason": f"{len(services_in_batch)} services alerting in the same window — possible cascading failure",
-                "alerts": list(alerts),
-                "confidence": min(0.9, 0.6 + 0.05 * len(services_in_batch)),
-            })
-
-    # -- same host --
-    host_groups = defaultdict(list)
-    for a in alerts:
-        host = a.get("host")
-        if host:
-            host_groups[host].append(a)
-    for host, h_alerts in host_groups.items():
-        if len(h_alerts) >= 2:
-            ids = frozenset(a["id"] for a in h_alerts)
-            if ids not in seen_id_sets:
-                seen_id_sets.add(ids)
-                groups.append({
-                    "type": "same_host",
-                    "reason": f"Multiple alerts on host {host}",
-                    "alerts": h_alerts,
-                    "confidence": 0.7,
-                })
-
-    # -- same service (fallback) --
-    for svc, svc_alerts in service_alerts.items():
-        if len(svc_alerts) >= 2:
-            ids = frozenset(a["id"] for a in svc_alerts)
-            if ids not in seen_id_sets:
-                seen_id_sets.add(ids)
-                groups.append({
-                    "type": "same_service",
-                    "reason": f"Multiple alerts on service {svc}",
-                    "alerts": svc_alerts,
-                    "confidence": 0.6,
-                })
-
-    groups.sort(key=lambda g: g["confidence"], reverse=True)
-    return groups
+def _confidence_fn(group_type: str, combined_alerts: List[Dict[str, Any]]) -> float:
+    n = len(combined_alerts)
+    if group_type == "topology_dependency":
+        return min(0.95, 0.75 + 0.05 * n)
+    if group_type == "metric_pattern":
+        hosts = len({a.get("host") for a in combined_alerts if a.get("host")})
+        return min(0.9, 0.7 + 0.05 * hosts)
+    if group_type == "severity_cascade":
+        services = len({a.get("service") for a in combined_alerts if a.get("service")})
+        return min(0.9, 0.6 + 0.05 * services)
+    if group_type == "same_host":
+        return 0.7
+    if group_type == "same_service":
+        return 0.6
+    return 0.5
 
 
 def _root_cause_and_actions(group_type: str, reason: str, alerts: List[Dict[str, Any]]):
@@ -299,6 +215,7 @@ async def _create_incident_from_group(
     alerts: List[Dict[str, Any]],
     context: Dict[str, Any],
     tenant_id: Optional[str],
+    root_cause_entity: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     if not alerts:
         return None
@@ -328,6 +245,7 @@ async def _create_incident_from_group(
         "correlation_rule_id": group_type if group_type in STRUCTURAL_TYPES else None,
         "correlation_type": group_type,
         "root_cause": root_cause,
+        "root_cause_entity": root_cause_entity,
         "suggested_actions": suggested_actions,
         "ai_analysis": {
             "correlation_type": group_type,
@@ -404,7 +322,10 @@ async def correlate_alerts(time_window_minutes: int = 15, tenant_id: Optional[st
     service_status = await get_service_status_counts()
     context = {"server_metrics": server_metrics, "apm_metrics": apm_metrics, "service_status": service_status}
 
-    groups = _multi_dimension_group(uncorrelated_alerts, service_map, service_id_map, upstream, downstream)
+    groups = multi_dimension_group(
+        uncorrelated_alerts, service_map, service_id_map, upstream, downstream,
+        get_service=_get_service, get_host=_get_host, confidence_fn=_confidence_fn,
+    )
 
     created_incidents = []
     claimed_ids = set()
@@ -413,7 +334,8 @@ async def correlate_alerts(time_window_minutes: int = 15, tenant_id: Optional[st
         if len(group_alerts) < 2:
             continue
         incident = await _create_incident_from_group(
-            group["type"], group["reason"], group["confidence"], group_alerts, context, tenant_id
+            group["type"], group["reason"], group["confidence"], group_alerts, context, tenant_id,
+            root_cause_entity=group.get("root_cause_entity"),
         )
         if incident:
             created_incidents.append(incident)
