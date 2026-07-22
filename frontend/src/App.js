@@ -77,6 +77,7 @@ import TenantSchedulesPage from './pages/TenantSchedulesPage';
 import ReportBuilderPage from './pages/ReportBuilderPage';
 import PublicPortalPage from './pages/PublicPortalPage';
 import APMTracesPage from './pages/APMTracesPage';
+import ServiceDetailPage from './pages/ServiceDetailPage';
 import APMQuickstartPage from './pages/APMQuickstartPage';
 import PricingPage from './pages/PricingPage';
 import AdminPlansPage from './pages/AdminPlansPage';
@@ -706,13 +707,21 @@ const AppRoutes = () => {
                     </ProtectedRoute>
                 } 
             />
-            <Route 
-                path="/apm-traces" 
+            <Route
+                path="/apm-traces"
                 element={
                     <ProtectedRoute>
                         <APMTracesPage />
                     </ProtectedRoute>
-                } 
+                }
+            />
+            <Route
+                path="/apm/services/:serviceName"
+                element={
+                    <ProtectedRoute>
+                        <ServiceDetailPage />
+                    </ProtectedRoute>
+                }
             />
             <Route 
                 path="/apm-quickstart" 

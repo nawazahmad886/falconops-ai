@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
@@ -27,6 +28,7 @@ import { motion } from 'framer-motion';
 
 export const APMPage = () => {
     const { api } = useAuth();
+    const navigate = useNavigate();
     const [dashboard, setDashboard] = useState(null);
     const [services, setServices] = useState([]);
     const [selectedService, setSelectedService] = useState(null);
@@ -223,7 +225,7 @@ export const APMPage = () => {
                                         {dashboard?.services?.map((svc, idx) => (
                                             <div 
                                                 key={idx}
-                                                onClick={() => setSelectedService(svc)}
+                                                onClick={() => navigate(`/apm/services/${encodeURIComponent(svc.service_name)}`)}
                                                 className={`flex items-center justify-between p-3 rounded-sm border cursor-pointer transition-colors ${
                                                     selectedService?.id === svc.id 
                                                         ? 'bg-cyan-500/10 border-cyan-500/30' 

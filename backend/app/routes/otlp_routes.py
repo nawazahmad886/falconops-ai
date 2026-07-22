@@ -80,6 +80,21 @@ def _ns_diff_ms(start_ns: str, end_ns: str) -> float:
         return 0.0
 
 
+def _extract_exception(span: Dict) -> Dict[str, Optional[str]]:
+    """OTel semantic convention: an exception recorded on a span appears as a span
+    event named 'exception' carrying exception.type/exception.message attributes.
+    Real data if the instrumented app actually recorded one; None otherwise — never
+    fabricated."""
+    for event in span.get("events") or []:
+        if event.get("name") == "exception":
+            attrs = _attrs_to_dict(event.get("attributes") or [])
+            return {
+                "exception_type": attrs.get("exception.type"),
+                "exception_message": attrs.get("exception.message"),
+            }
+    return {"exception_type": None, "exception_message": None}
+
+
 def _normalize_span(span: Dict, resource_attrs: Dict, scope_name: str) -> Dict:
     """Convert one OTLP span to our internal schema."""
     span_attrs = _attrs_to_dict(span.get("attributes") or [])
@@ -92,6 +107,7 @@ def _normalize_span(span: Dict, resource_attrs: Dict, scope_name: str) -> Dict:
     # Map status code: 0=UNSET 1=OK 2=ERROR
     status_text = "ERROR" if status == 2 else "OK"
     kind_map = {1: "INTERNAL", 2: "SERVER", 3: "CLIENT", 4: "PRODUCER", 5: "CONSUMER"}
+    exc = _extract_exception(span)
     return {
         "id": str(uuid.uuid4()),
         "trace_id": span.get("traceId"),
@@ -105,6 +121,8 @@ def _normalize_span(span: Dict, resource_attrs: Dict, scope_name: str) -> Dict:
         "duration_ms": _ns_diff_ms(span.get("startTimeUnixNano", "0"),
                                    span.get("endTimeUnixNano", "0")),
         "status": status_text,
+        "exception_type": exc["exception_type"],
+        "exception_message": exc["exception_message"],
         "attributes": span_attrs,
         "resource": resource_attrs,
         "scope": scope_name,
@@ -463,6 +481,159 @@ async def service_correlation(service_name: str, hours: int = Query(24, ge=1, le
         "downstream": downstream,
         "recent_traces": recent_traces,
     }
+
+
+async def _service_error_breakdown(service_name: str, minutes: int = 120) -> Dict[str, Any]:
+    """Real per-operation error breakdown for one service, grouped by exception type
+    when the instrumented app actually recorded one (see _extract_exception) —
+    otherwise honestly reports no exception detail rather than inventing a message."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    spans = await db.otel_spans.find(
+        {"service": service_name, "status": "ERROR", "received_at": {"$gte": cutoff}},
+        {"_id": 0, "operation": 1, "exception_type": 1, "exception_message": 1, "start_time": 1},
+    ).to_list(5000)
+
+    groups: Dict[Any, Dict[str, Any]] = {}
+    any_detail = False
+    for s in spans:
+        key = (s.get("operation"), s.get("exception_type"))
+        g = groups.setdefault(key, {"count": 0, "sample_message": None, "last_seen": None})
+        g["count"] += 1
+        if s.get("exception_type"):
+            any_detail = True
+            if not g["sample_message"] and s.get("exception_message"):
+                g["sample_message"] = s["exception_message"][:500]
+        if not g["last_seen"] or (s.get("start_time") or "") > g["last_seen"]:
+            g["last_seen"] = s.get("start_time")
+
+    rows = [
+        {"operation": op, "exception_type": exc_type, "count": g["count"],
+         "sample_message": g["sample_message"], "last_seen": g["last_seen"]}
+        for (op, exc_type), g in groups.items()
+    ]
+    rows.sort(key=lambda r: r["count"], reverse=True)
+    return {"service": service_name, "count": len(spans), "errors": rows, "detail_available": any_detail}
+
+
+async def _service_health_score(service_name: str, hours: int = 1) -> Dict[str, Any]:
+    """Real weighted-composite service health score — same shape as
+    executive_routes._compute_security_score, but any component with no real signal for
+    this service is dropped from the average (never defaulted/fabricated), and the
+    response says exactly which components were actually available."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    metrics = (await _service_latency_metrics(cutoff)).get(service_name)
+
+    components: Dict[str, float] = {}
+
+    if metrics and metrics.get("call_count"):
+        components["latency"] = round(max(0.0, 100 - (metrics.get("avg_latency_ms") or 0) / 20), 1)
+        components["error_rate"] = round(max(0.0, 100 - (metrics.get("error_rate_pct") or 0) * 5), 1)
+
+    upstream = await db.service_dependencies.find({"depends_on": service_name}, {"_id": 0}).to_list(200)
+    downstream = await db.service_dependencies.find({"service": service_name}, {"_id": 0}).to_list(200)
+    edge_error_rates = [
+        (e.get("error_count", 0) / e["call_count"]) * 100
+        for e in (upstream + downstream) if e.get("call_count")
+    ]
+    if edge_error_rates:
+        avg_edge_error = sum(edge_error_rates) / len(edge_error_rates)
+        components["dependency_health"] = round(max(0.0, 100 - avg_edge_error * 5), 1)
+
+    try:
+        from ..services.capacity_prediction_engine import capacity_prediction_engine
+        alerts = await capacity_prediction_engine.get_capacity_alerts()
+        matched = [a for a in alerts if service_name.lower() in (a.get("host") or "").lower()]
+        if matched:
+            risk_penalty = {"critical": 40, "high": 25, "medium": 10}
+            penalty = max(risk_penalty.get(a.get("risk_level"), 0) for a in matched)
+            components["capacity_risk"] = round(max(0.0, 100 - penalty), 1)
+    except Exception as e:
+        logger.debug(f"Capacity component skipped for {service_name}: {e}")
+
+    if not components:
+        return {"composite_score": None, "components": {}, "available_components": [],
+                "note": "No real signal available for this service in the selected window."}
+
+    composite = round(sum(components.values()) / len(components), 1)
+    return {"composite_score": composite, "components": components,
+            "available_components": list(components.keys())}
+
+
+@trace_router.get("/services/{service_name}/operations")
+async def service_operations(service_name: str, minutes: int = Query(60, ge=1, le=10080),
+                             limit: int = Query(15, le=50),
+                             user: dict = Depends(require_auth)):
+    """Per-operation (endpoint) latency + error stats for one service — thin route over
+    the same ai_tools_service.get_api_operation_stats tool the AI agents use, so the
+    Transactions tab and the agents see identical numbers."""
+    from ..services import ai_tools_service
+    result = await ai_tools_service.get_api_operation_stats(service=service_name, minutes=minutes, limit=limit)
+    return {"service": service_name, "operations": result.get("data", []), "count": result.get("count", 0)}
+
+
+@trace_router.get("/services/{service_name}/errors")
+async def service_errors(service_name: str, minutes: int = Query(120, ge=1, le=10080),
+                         user: dict = Depends(require_auth)):
+    """Real per-operation error breakdown for one service — see _service_error_breakdown."""
+    return await _service_error_breakdown(service_name, minutes)
+
+
+@trace_router.get("/services/{service_name}/health-score")
+async def service_health_score(service_name: str, hours: int = Query(1, ge=1, le=168),
+                               user: dict = Depends(require_auth)):
+    """Real weighted-composite health score for one service — see _service_health_score."""
+    return await _service_health_score(service_name, hours)
+
+
+@trace_router.get("/services/{service_name}/overview")
+async def service_overview(service_name: str, hours: int = Query(1, ge=1, le=168),
+                           user: dict = Depends(require_auth)):
+    """One-call aggregator for the Service Detail Page header: real latency/error
+    metrics, health score, recent error counts, and dependency counts."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    metrics = (await _service_latency_metrics(cutoff)).get(service_name, {
+        "call_count": 0, "error_count": 0, "error_rate_pct": 0,
+        "avg_latency_ms": 0, "p95_latency_ms": 0,
+    })
+    health = await _service_health_score(service_name, hours)
+    error_breakdown = await _service_error_breakdown(service_name, hours * 60)
+    upstream_count = await db.service_dependencies.count_documents({"depends_on": service_name})
+    downstream_count = await db.service_dependencies.count_documents({"service": service_name})
+
+    return {
+        "service": service_name,
+        "metrics": metrics,
+        "health": health,
+        "recent_error_groups": len(error_breakdown["errors"]),
+        "recent_errors_total": error_breakdown["count"],
+        "upstream_count": upstream_count,
+        "downstream_count": downstream_count,
+    }
+
+
+@trace_router.get("/services/{service_name}/root-cause")
+async def service_root_cause(service_name: str, hours: int = Query(2, ge=1, le=168),
+                             user: dict = Depends(require_auth)):
+    """On-demand AI root cause for one service — reuses the existing single-shot RCA
+    engine (intelligence_agents_service.incident_analysis) scoped to this service,
+    without requiring a pre-existing incident."""
+    from ..services.intelligence_agents_service import incident_analysis
+    return await incident_analysis(
+        query=f"Why is {service_name} slow or erroring?", service=service_name,
+        time_range_minutes=hours * 60, user=user,
+    )
+
+
+@trace_router.get("/services/{service_name}/recommendations")
+async def service_recommendations(service_name: str, user: dict = Depends(require_auth)):
+    """On-demand AI recommendations for one service — reuses the existing
+    api_performance ops agent (no new agent logic)."""
+    from ..services.ops_agents_service import run_ops_agent
+    result = await run_ops_agent(
+        "api_performance", f"What should we do to improve {service_name}'s performance and reliability?",
+        tenant_id=user.get("tenant_id"),
+    )
+    return result or {"summary": "Ops agent unavailable", "recommended_actions": []}
 
 
 @trace_router.get("/stats/summary")

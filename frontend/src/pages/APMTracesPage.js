@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Link } from 'react-router-dom';
 import { Card, CardContent } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
@@ -401,6 +402,11 @@ const ServiceCorrelationPanel = ({ service, hours, onClose, onDiagnose, onSelect
                         </div>
                     </div>
                     <div className="flex items-center gap-2 shrink-0">
+                        <Link to={`/apm/services/${encodeURIComponent(data.service)}`} data-testid="view-service-page-link">
+                            <Button variant="outline" size="sm" className="text-cyan-300 border-cyan-500/30 hover:bg-cyan-500/10">
+                                View full page
+                            </Button>
+                        </Link>
                         <Button
                             variant="outline"
                             size="sm"
