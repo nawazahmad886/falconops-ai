@@ -316,6 +316,7 @@ export const StepConfigPanel = ({ step, onChange, onClose, agentCatalog = [] }) 
                         <SelectTrigger className="bg-muted/50"><SelectValue /></SelectTrigger>
                         <SelectContent>
                             <SelectItem value="security">Security Agent</SelectItem>
+                            <SelectItem value="ops">Ops Agent</SelectItem>
                             <SelectItem value="core">Core Agent</SelectItem>
                         </SelectContent>
                     </Select>

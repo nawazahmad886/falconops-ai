@@ -188,15 +188,17 @@ async def get_agent_catalog_endpoint(current_user: Optional[dict] = Depends(get_
     """List every AI agent a 'call_agent' workflow step can invoke — the 5 specialized
     security agents plus the 3 core (rca/summarizer/healer) agents. Powers the
     workflow builder's agent-picker dropdown."""
-    from ..services.security_agents_service import get_agent_catalog
+    from ..services.security_agents_service import get_agent_catalog as get_security_catalog
+    from ..services.ops_agents_service import get_agent_catalog as get_ops_catalog
     from ..services.ai_agents_service import AGENTS
 
-    security = [{**a, "agent_source": "security"} for a in get_agent_catalog()]
+    security = [{**a, "agent_source": "security"} for a in get_security_catalog()]
+    ops = [{**a, "agent_source": "ops"} for a in get_ops_catalog()]
     core = [
         {"id": aid, "name": a["name"], "specialty": a["role"], "tools": [], "agent_source": "core"}
         for aid, a in AGENTS.items()
     ]
-    return {"agents": security + core}
+    return {"agents": security + ops + core}
 
 
 @router.get("/trigger-types")

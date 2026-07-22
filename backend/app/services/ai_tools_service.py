@@ -284,6 +284,126 @@ async def get_topology_summary() -> Dict[str, Any]:
                        f"system risk {risk.get('risk_level')} ({risk.get('risk_score')})"}
 
 
+async def get_api_operation_stats(service: Optional[str] = None, minutes: int = 60,
+                                  limit: int = 15) -> Dict[str, Any]:
+    """Per-operation (endpoint) latency + error stats, grouped directly from real span
+    data (db.otel_spans) — same real tracing backbone get_traces uses, just grouped by
+    operation instead of by trace, ranked worst-first (error rate then p95 latency)."""
+    q: Dict[str, Any] = {"received_at": {"$gte": _cutoff(minutes)}}
+    if service:
+        q["service"] = service
+    spans = await db.otel_spans.find(
+        q, {"_id": 0, "service": 1, "operation": 1, "duration_ms": 1, "status": 1}
+    ).to_list(20000)
+
+    by_op: Dict[Any, Dict[str, Any]] = {}
+    for s in spans:
+        key = (s.get("service"), s.get("operation"))
+        g = by_op.setdefault(key, {"durations": [], "errors": 0})
+        g["durations"].append(s.get("duration_ms") or 0)
+        if s.get("status") == "ERROR":
+            g["errors"] += 1
+
+    rows = []
+    for (svc, op), g in by_op.items():
+        n = len(g["durations"])
+        durations = sorted(g["durations"])
+        p95 = durations[max(0, int(n * 0.95) - 1)] if durations else 0
+        rows.append({
+            "service": svc, "operation": op, "call_count": n, "error_count": g["errors"],
+            "error_rate_pct": round((g["errors"] / n) * 100, 2) if n else 0,
+            "avg_duration_ms": round(sum(durations) / n, 2) if n else 0,
+            "p95_duration_ms": round(p95, 2),
+        })
+    rows.sort(key=lambda r: (r["error_rate_pct"], r["p95_duration_ms"]), reverse=True)
+    rows = rows[:limit]
+    return {"tool": "get_api_operation_stats", "params": {"service": service, "minutes": minutes},
+            "count": len(rows), "data": rows,
+            "summary": f"{len(rows)} API operation(s) analyzed in last {minutes}m" + (f" for '{service}'" if service else "")}
+
+
+async def get_capacity_forecast(threshold: float = 90, horizon: str = "24h") -> Dict[str, Any]:
+    """Real linear-regression capacity forecast (CPU/memory/disk) — reuses
+    capacity_prediction_engine's already-computed trend + time-to-threshold analysis
+    rather than a new forecasting model."""
+    from .capacity_prediction_engine import capacity_prediction_engine
+    alerts = await capacity_prediction_engine.get_capacity_alerts(threshold=threshold, horizon=horizon)
+    return {"tool": "get_capacity_forecast", "params": {"threshold": threshold, "horizon": horizon},
+            "count": len(alerts), "data": alerts,
+            "summary": f"{len(alerts)} host/metric combination(s) approaching capacity thresholds within {horizon}"}
+
+
+async def get_sla_risk(limit: int = 20) -> Dict[str, Any]:
+    """Open incidents with a real, already-computed SLA breach deadline
+    (incident_engine's severity-based sla_breach_at), sorted soonest-breach-first."""
+    now = datetime.now(timezone.utc)
+    q = {"sla_breach_at": {"$ne": None}, "is_sla_breached": False,
+         "status": {"$nin": ["resolved", "closed"]}}
+    rows = await db.incidents_engine.find(q, {"_id": 0}).sort("sla_breach_at", 1).limit(limit).to_list(limit)
+
+    data = []
+    for r in rows:
+        minutes_remaining = None
+        try:
+            breach_at = datetime.fromisoformat(r["sla_breach_at"].replace("Z", "+00:00"))
+            minutes_remaining = round((breach_at - now).total_seconds() / 60, 1)
+        except Exception:
+            pass
+        data.append({
+            "id": r.get("id"), "title": r.get("title"), "severity": r.get("severity"),
+            "status": r.get("status"), "sla_breach_at": r.get("sla_breach_at"),
+            "minutes_until_breach": minutes_remaining,
+        })
+    at_risk = sum(1 for d in data if d["minutes_until_breach"] is not None and d["minutes_until_breach"] < 30)
+    return {"tool": "get_sla_risk", "params": {"limit": limit}, "count": len(data), "data": data,
+            "summary": f"{len(data)} open incident(s) with an SLA deadline, {at_risk} breaching within 30 minutes"}
+
+
+async def get_ops_summary(days: int = 7) -> Dict[str, Any]:
+    """Composite ops health snapshot: incident volume/MTTR (db.incidents +
+    db.incidents_engine) and real automation-outcome success rate
+    (db.incident_outcomes, written by autonomous_ops_orchestrator.record_outcome) —
+    mirrors how executive_routes.py composes the security executive dashboard, for
+    operational health instead. Reports 'n/a' rather than fabricating a rate when no
+    outcomes have been recorded yet."""
+    cutoff = _cutoff(days * 1440)
+    legacy = await db.incidents.find(
+        {"created_at": {"$gte": cutoff}}, {"_id": 0, "mttr_seconds": 1, "status": 1}
+    ).to_list(2000)
+    engine = await db.incidents_engine.find(
+        {"created_at": {"$gte": cutoff}}, {"_id": 0, "status": 1}
+    ).to_list(2000)
+    outcomes = await db.incident_outcomes.find(
+        {"recorded_at": {"$gte": cutoff}}, {"_id": 0, "was_effective": 1}
+    ).to_list(2000)
+
+    mttr_values = [i["mttr_seconds"] for i in legacy if i.get("mttr_seconds")]
+    avg_mttr_minutes = round(sum(mttr_values) / len(mttr_values) / 60, 1) if mttr_values else None
+
+    resolved_outcomes = [o for o in outcomes if o.get("was_effective") is not None]
+    effective_count = sum(1 for o in resolved_outcomes if o.get("was_effective"))
+    automation_success_rate_pct = round((effective_count / len(resolved_outcomes)) * 100, 1) if resolved_outcomes else None
+
+    total_incidents = len(legacy) + len(engine)
+    open_incidents = (sum(1 for i in legacy if i.get("status") not in ("resolved", "closed")) +
+                       sum(1 for i in engine if i.get("status") not in ("resolved", "closed")))
+
+    return {
+        "tool": "get_ops_summary", "params": {"days": days}, "count": total_incidents,
+        "data": {
+            "total_incidents": total_incidents, "open_incidents": open_incidents,
+            "avg_mttr_minutes": avg_mttr_minutes,
+            "automation_success_rate_pct": automation_success_rate_pct,
+            "automation_outcomes_recorded": len(resolved_outcomes),
+        },
+        "summary": (f"{total_incidents} incident(s) in last {days}d, {open_incidents} open, "
+                    f"avg MTTR {avg_mttr_minutes if avg_mttr_minutes is not None else 'n/a'}min, "
+                    f"automation success rate "
+                    f"{automation_success_rate_pct if automation_success_rate_pct is not None else 'n/a (no recorded outcomes)'}"
+                    f"{'%' if automation_success_rate_pct is not None else ''}"),
+    }
+
+
 async def list_services() -> List[str]:
     """Known services across logs + traces."""
     try:
@@ -329,6 +449,14 @@ TOOL_DEFS: List[Dict[str, Any]] = [
      "params": {"framework": "string?"}},
     {"name": "get_topology_summary", "description": "Query the service topology (nodes/edges) and overall system risk score.",
      "params": {}},
+    {"name": "get_api_operation_stats", "description": "Per-operation (endpoint) latency + error rate, ranked worst-first, from real trace span data.",
+     "params": {"service": "string?", "minutes": "int (default 60)", "limit": "int (default 15)"}},
+    {"name": "get_capacity_forecast", "description": "Real linear-regression capacity forecast (CPU/memory/disk) — hosts/metrics approaching threshold.",
+     "params": {"threshold": "float (default 90)", "horizon": "string (default 24h)"}},
+    {"name": "get_sla_risk", "description": "Open incidents with a real SLA breach deadline, sorted soonest-breach-first.",
+     "params": {"limit": "int (default 20)"}},
+    {"name": "get_ops_summary", "description": "Composite ops health snapshot: incident volume, MTTR, and automation success rate.",
+     "params": {"days": "int (default 7)"}},
 ]
 
 _TOOL_FUNCS = {
@@ -345,6 +473,10 @@ _TOOL_FUNCS = {
     "get_mitre_matrix": get_mitre_matrix,
     "get_compliance_status": get_compliance_status,
     "get_topology_summary": get_topology_summary,
+    "get_api_operation_stats": get_api_operation_stats,
+    "get_capacity_forecast": get_capacity_forecast,
+    "get_sla_risk": get_sla_risk,
+    "get_ops_summary": get_ops_summary,
 }
 
 _ALLOWED_PARAMS = {
@@ -361,6 +493,10 @@ _ALLOWED_PARAMS = {
     "get_mitre_matrix": {"hours"},
     "get_compliance_status": {"framework"},
     "get_topology_summary": set(),
+    "get_api_operation_stats": {"service", "minutes", "limit"},
+    "get_capacity_forecast": {"threshold", "horizon"},
+    "get_sla_risk": {"limit"},
+    "get_ops_summary": {"days"},
 }
 
 

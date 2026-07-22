@@ -76,6 +76,7 @@ from .compliance_routes import router as compliance_router
 from .security_agents_routes import router as security_agents_router
 from .executive_routes import router as executive_router
 from .agent_eval_routes import router as agent_eval_router
+from .ops_agents_routes import router as ops_agents_router
 
 # Export all routers
 all_routers = [
@@ -161,4 +162,5 @@ all_routers = [
     security_agents_router,
     executive_router,
     agent_eval_router,
+    ops_agents_router,
 ]

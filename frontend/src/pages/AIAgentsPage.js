@@ -50,6 +50,12 @@ export default function AIAgentsPage() {
     const [evalTestSets, setEvalTestSets] = useState([]);
     const [evalHistory, setEvalHistory] = useState([]);
     const [evalRunning, setEvalRunning] = useState(null);
+    // Specialized (security + ops) agents state
+    const [specializedAgents, setSpecializedAgents] = useState([]);
+    const [specializedAgentId, setSpecializedAgentId] = useState(null);
+    const [specializedQuery, setSpecializedQuery] = useState('');
+    const [specializedRunning, setSpecializedRunning] = useState(false);
+    const [specializedResult, setSpecializedResult] = useState(null);
 
     const fetchData = useCallback(async () => {
         setLoading(true);
@@ -98,6 +104,32 @@ export default function AIAgentsPage() {
         } catch (e) { console.error(e); }
         setEvalRunning(null);
     }, [api, fetchEval]);
+
+    const fetchSpecializedAgents = useCallback(async () => {
+        try {
+            const [secRes, opsRes] = await Promise.all([
+                api.get('/security-agents'), api.get('/ops-agents'),
+            ]);
+            const security = (secRes.data?.agents || []).map(a => ({ ...a, family: 'security' }));
+            const ops = (opsRes.data?.agents || []).map(a => ({ ...a, family: 'ops' }));
+            const combined = [...security, ...ops];
+            setSpecializedAgents(combined);
+            if (!specializedAgentId && combined.length > 0) setSpecializedAgentId(combined[0].id);
+        } catch (e) { console.error(e); }
+    }, [api, specializedAgentId]);
+
+    const runSpecializedAgent = useCallback(async () => {
+        const agent = specializedAgents.find(a => a.id === specializedAgentId);
+        if (!agent || !specializedQuery.trim()) return;
+        setSpecializedRunning(true);
+        setSpecializedResult(null);
+        try {
+            const prefix = agent.family === 'security' ? '/security-agents' : '/ops-agents';
+            const res = await api.post(`${prefix}/${agent.id}/run`, { query: specializedQuery });
+            setSpecializedResult(res.data);
+        } catch (e) { console.error(e); }
+        setSpecializedRunning(false);
+    }, [api, specializedAgents, specializedAgentId, specializedQuery]);
 
     const runAnalysis = useCallback(async () => {
         if (!inputData.trim()) return;
@@ -158,6 +190,7 @@ export default function AIAgentsPage() {
     useEffect(() => { if (tab === 'memory') fetchMemory(); }, [tab, fetchMemory]);
     useEffect(() => { if (tab === 'pipeline') fetchPipeline(); }, [tab, fetchPipeline]);
     useEffect(() => { if (tab === 'eval') fetchEval(); }, [tab, fetchEval]);
+    useEffect(() => { if (tab === 'specialized') fetchSpecializedAgents(); }, [tab, fetchSpecializedAgents]);
 
     const sampleIncidents = [
         { label: 'API Gateway 502', data: '{"alert":"API Gateway returning 502 errors","affected":"payment-service, user-service","duration":"15 minutes","error_rate":"45%","region":"us-east"}' },
@@ -168,6 +201,7 @@ export default function AIAgentsPage() {
 
     const tabs = [
         { id: 'analyze', label: 'Analyze', icon: Brain },
+        { id: 'specialized', label: 'Specialized', icon: Shield },
         { id: 'memory', label: 'Memory', icon: Database },
         { id: 'pipeline', label: 'Pipeline', icon: Workflow },
         { id: 'history', label: 'History', icon: History },
@@ -271,6 +305,101 @@ export default function AIAgentsPage() {
                                         <div className="text-xs text-white/70 whitespace-pre-wrap leading-relaxed pl-8">{typeof r.analysis === 'string' ? r.analysis : String(r.analysis || '')}</div>
                                     </div>
                                 ); })}
+                            </CardContent>
+                        </Card>
+                    )}
+                </div>
+            )}
+
+            {/* ======================== SPECIALIZED AGENTS TAB ======================== */}
+            {/* Tool-calling specialized agents (Security: Threat Hunting/Compliance/Cloud
+                Security/Network/Identity; Ops: API Performance/Capacity/SLA Risk/Executive Ops) —
+                distinct from the simple no-tools crew agents above: each gathers real evidence
+                via ai_tools_service before one structured LLM call. */}
+            {tab === 'specialized' && (
+                <div className="space-y-4">
+                    <Card className="bg-[#0D1117] border-white/5">
+                        <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-base flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> Specialized Agents</CardTitle></CardHeader>
+                        <CardContent className="p-4 space-y-4">
+                            <div>
+                                <p className="text-xs text-white/60 mb-2">Select an agent:</p>
+                                <div className="flex flex-wrap gap-2">
+                                    {specializedAgents.map(a => (
+                                        <Button
+                                            key={a.id}
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={() => setSpecializedAgentId(a.id)}
+                                            className={`text-[10px] ${specializedAgentId === a.id ? (a.family === 'security' ? 'bg-red-500/15 text-red-400' : 'bg-cyan-500/15 text-cyan-400') : 'text-white/30 border-white/10'}`}
+                                            data-testid={`select-specialized-${a.id}`}
+                                        >
+                                            <Shield className="w-3 h-3 mr-1" /> {a.name}
+                                        </Button>
+                                    ))}
+                                    {specializedAgents.length === 0 && <p className="text-xs text-white/30">Loading agents...</p>}
+                                </div>
+                                {specializedAgentId && (
+                                    <p className="text-[10px] text-white/40 mt-2">
+                                        {specializedAgents.find(a => a.id === specializedAgentId)?.specialty}
+                                    </p>
+                                )}
+                            </div>
+                            <div>
+                                <p className="text-xs text-white/60 mb-2">Question:</p>
+                                <textarea
+                                    className="w-full h-20 bg-[#161B22] border border-white/10 rounded-md p-3 text-sm text-white/80 resize-none focus:outline-none focus:border-cyan-500/50"
+                                    value={specializedQuery}
+                                    onChange={e => setSpecializedQuery(e.target.value)}
+                                    placeholder="e.g. Which API operations are slowest right now?"
+                                    data-testid="specialized-query-input"
+                                />
+                            </div>
+                            <Button
+                                onClick={runSpecializedAgent}
+                                disabled={specializedRunning || !specializedQuery.trim() || !specializedAgentId}
+                                className="bg-cyan-600 hover:bg-cyan-700 text-white"
+                                data-testid="run-specialized-agent-btn"
+                            >
+                                {specializedRunning ? <RefreshCw className="w-3 h-3 mr-1 animate-spin" /> : <Play className="w-3 h-3 mr-1" />} {specializedRunning ? 'Running...' : 'Run Agent'}
+                            </Button>
+                        </CardContent>
+                    </Card>
+
+                    {specializedResult && (
+                        <Card className="bg-[#0D1117] border-cyan-500/20" data-testid="specialized-result">
+                            <CardHeader className="pb-3 border-b border-white/5">
+                                <div className="flex items-center justify-between">
+                                    <CardTitle className="text-base flex items-center gap-2"><Shield className="w-4 h-4 text-cyan-400" /> {specializedResult.agent_name}</CardTitle>
+                                    <Badge variant="outline" className="text-[9px] text-white/40 border-white/10">confidence {Math.round((specializedResult.confidence || 0) * 100)}%</Badge>
+                                </div>
+                            </CardHeader>
+                            <CardContent className="p-4 space-y-3">
+                                <p className="text-sm text-white/85">{specializedResult.summary}</p>
+                                {specializedResult.evidence?.length > 0 && (
+                                    <div>
+                                        <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1">Evidence</p>
+                                        <ul className="space-y-1">
+                                            {specializedResult.evidence.map((e, i) => (
+                                                <li key={i} className="text-xs text-white/60 flex items-start gap-1.5"><span className="text-cyan-400 mt-0.5">•</span>{e}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                {specializedResult.recommended_actions?.length > 0 && (
+                                    <div>
+                                        <p className="text-[10px] uppercase tracking-widest text-white/40 mb-1">Recommended Actions</p>
+                                        <ul className="space-y-1">
+                                            {specializedResult.recommended_actions.map((a, i) => (
+                                                <li key={i} className="text-xs text-white/70 flex items-start gap-1.5"><span className="text-emerald-400 mt-0.5">•</span>{a}</li>
+                                            ))}
+                                        </ul>
+                                    </div>
+                                )}
+                                <div className="flex flex-wrap gap-1 pt-1">
+                                    {(specializedResult.tool_trace || []).map((t, i) => (
+                                        <Badge key={i} variant="outline" className="text-[9px] text-white/30 border-white/10">{t.tool}</Badge>
+                                    ))}
+                                </div>
                             </CardContent>
                         </Card>
                     )}

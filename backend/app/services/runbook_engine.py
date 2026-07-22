@@ -695,9 +695,25 @@ class RunbookEngine:
                 "narrative": result.get("analysis", ""),
                 "success": True,
             }
+        elif agent_source == "ops":
+            from .ops_agents_service import run_ops_agent
+            tenant_id = self.execution_context.get("variables", {}).get("tenant_id")
+            result = await run_ops_agent(agent_id, query, tenant_id=tenant_id)
+            if not result:
+                return {"agent_source": agent_source, "agent_id": agent_id, "success": False,
+                         "error": f"Unknown ops agent '{agent_id}'"}
+            return {
+                "agent_source": agent_source,
+                "agent_id": agent_id,
+                "agent_name": result.get("agent_name"),
+                "narrative": result.get("summary", ""),
+                "confidence": result.get("confidence"),
+                "recommended_actions": result.get("recommended_actions", []),
+                "success": True,
+            }
         else:
             return {"agent_source": agent_source, "success": False,
-                     "error": f"Unknown agent_source '{agent_source}' (expected 'security' or 'core')"}
+                     "error": f"Unknown agent_source '{agent_source}' (expected 'security', 'core', or 'ops')"}
 
     def _interpolate_variables(self, text: str) -> str:
         """Replace {{variable}} placeholders with actual values. Supports one level of
