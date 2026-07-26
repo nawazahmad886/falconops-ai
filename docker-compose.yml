@@ -49,6 +49,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    # NET_RAW: needed for real ICMP traceroute (network path analyzer) — raw sockets
+    # to send/receive ICMP echo + time-exceeded packets. Without it the traceroute
+    # endpoint degrades gracefully to DNS/TCP/TLS timing only (see network_path_service.py).
+    cap_add:
+      - NET_RAW
     # Loopback-only — reached externally only via the nginx reverse proxy.
     ports:
       - "127.0.0.1:8001:8001"

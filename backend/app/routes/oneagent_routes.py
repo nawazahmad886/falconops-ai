@@ -243,6 +243,20 @@ async def ingest_traces(request: Request, key: Dict = Depends(_verify_api_key)) 
     return {"status": "ok", "ingested": len(span_docs), "traces": len(traces)}
 
 
+@ingest_router.post("/netflows")
+async def ingest_netflows(request: Request, key: Dict = Depends(_verify_api_key)) -> Dict:
+    """Receives netflow plugin batches (see oneagent/pkg/plugins/netflow) — established
+    TCP connections observed via /proc/net/tcp{,6}, attributed to a service where
+    possible. Delegates enrichment (GeoIP/ASN, threat intel) and persistence to
+    network_flow_service so this route stays a thin, consistent ingest shim like
+    ingest_logs/ingest_metrics/ingest_traces above."""
+    payload = await _read_batch(request)
+    host = payload.get("host", "unknown")
+    from ..services.network_flow_service import network_flow_service
+    result = await network_flow_service.enrich_and_persist_batch(host, payload["batch"])
+    return {"status": "ok", **result}
+
+
 @ingest_router.post("/heartbeat")
 async def ingest_heartbeat(request: Request, key: Dict = Depends(_verify_api_key)) -> Dict:
     raw = await request.body()

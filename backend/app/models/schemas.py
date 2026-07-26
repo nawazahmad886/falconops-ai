@@ -381,6 +381,15 @@ class TracerouteHop(BaseModel):
     status: str
     is_destination: bool = False
     location: Optional[str] = None
+    # ── real path-probe enrichment (additive) ──
+    rtt_samples_ms: Optional[List[float]] = None
+    packet_loss_pct: Optional[float] = None
+    jitter_ms: Optional[float] = None
+    asn: Optional[str] = None
+    isp: Optional[str] = None
+    org: Optional[str] = None
+    is_proxy_or_vpn: Optional[bool] = None
+    is_hosting: Optional[bool] = None
 
 class TracerouteResponse(BaseModel):
     monitor_id: str
@@ -391,6 +400,20 @@ class TracerouteResponse(BaseModel):
     hops: List[TracerouteHop]
     analysis: Optional[Dict[str, Any]] = None
     executed_at: str
+    # ── real path-probe enrichment (additive) ──
+    probe_method: Optional[str] = None  # "icmp" | "unavailable"
+    dns_resolution_ms: Optional[float] = None
+    tcp_connect_ms: Optional[float] = None
+    tls_handshake_ms: Optional[float] = None
+    target_port: Optional[int] = None
+    tcp_reachable: Optional[bool] = None
+    avg_packet_loss_pct: Optional[float] = None
+    avg_jitter_ms: Optional[float] = None
+    routing_loop_detected: Optional[bool] = None
+    routing_loop_detail: Optional[Dict[str, Any]] = None
+    route_changed: Optional[bool] = None
+    previous_hop_ips: Optional[List[Optional[str]]] = None
+    blocked_likely: Optional[bool] = None
 
 
 # ======================== SYNTHETIC MONITORING MODELS ========================

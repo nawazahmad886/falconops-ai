@@ -2,6 +2,9 @@
 FalconOps AI - Network Topology Routes
 Service dependency mapping and visualization
 """
+import asyncio
+import logging
+import socket
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
@@ -9,12 +12,17 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 
 from ..core.database import db
 from ..models.schemas import (
-    ServiceDependency, ServiceDependencyCreate, 
-    TopologyNode, TopologyEdge, NetworkTopologyResponse, TracerouteResponse
+    ServiceDependency, ServiceDependencyCreate,
+    TopologyNode, TopologyEdge, NetworkTopologyResponse, TracerouteResponse, TracerouteHop
 )
 from ..utils.auth import require_auth, require_write_access, get_current_user
+from ..services import network_path_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/topology", tags=["Topology"])
+
+TRACEROUTE_RATE_LIMIT = (5, 60)  # 5 traces / minute per user
 
 
 def _tid(user):
@@ -216,52 +224,186 @@ async def get_impact_analysis(monitor_id: str, current_user: Optional[dict] = De
 
 @router.post("/{monitor_id}/traceroute", response_model=TracerouteResponse)
 async def perform_traceroute(monitor_id: str, current_user: dict = Depends(require_auth)):
-    """Perform traceroute to a monitor target (simulated)"""
-    import socket
-    import random
-    
-    monitor = await db.monitors.find_one({"id": monitor_id}, {"_id": 0})
+    """Real network path analysis: ICMP TTL traceroute (per-hop packet loss/jitter,
+    reverse DNS, GeoIP/ASN/proxy enrichment) plus DNS/TCP/TLS timing to the actual
+    destination, with routing-loop/route-change/likely-blocked detection."""
+    from ..services.rate_limiter_service import is_rate_limited
+
+    if await is_rate_limited(f"traceroute:{current_user['id']}", *TRACEROUTE_RATE_LIMIT):
+        raise HTTPException(status_code=429, detail="Too many traceroute requests. Please try again shortly.")
+
+    tid = _tid(current_user)
+    query = {"id": monitor_id}
+    if tid:
+        query["tenant_id"] = tid
+    monitor = await db.monitors.find_one(query, {"_id": 0})
     if not monitor:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    
-    target = monitor["target"].replace("https://", "").replace("http://", "").split("/")[0]
-    
+
+    raw_target = monitor["target"]
+    scheme_hint = "https" if raw_target.startswith("https://") else "http"
+    hostname = raw_target.replace("https://", "").replace("http://", "").split("/")[0]
+    monitor_port = monitor.get("port")
+    now_iso = datetime.now(timezone.utc).isoformat()
+
     try:
-        target_ip = socket.gethostbyname(target)
+        target_ip = await asyncio.to_thread(socket.gethostbyname, hostname)
     except socket.gaierror:
         return TracerouteResponse(
             monitor_id=monitor_id,
-            target=target,
+            target=hostname,
             total_hops=0,
             destination_reached=False,
             failure_hop=1,
             hops=[],
             analysis={"error": "DNS resolution failed"},
-            executed_at=datetime.now(timezone.utc).isoformat()
+            executed_at=now_iso,
         )
-    
-    hops = []
-    num_hops = random.randint(8, 15)
-    
-    for i in range(1, num_hops + 1):
-        is_dest = (i == num_hops)
-        hops.append({
-            "hop_number": i,
-            "hostname": target if is_dest else f"router-{i}.network.local",
-            "ip_address": target_ip if is_dest else f"10.{random.randint(0,255)}.{random.randint(0,255)}.{i}",
-            "latency_ms": round(random.uniform(1, 50) * i / 2, 2),
-            "status": "success",
-            "is_destination": is_dest,
-            "location": "Destination" if is_dest else f"Hop {i}"
+
+    trace_result, endpoint_result = await asyncio.gather(
+        network_path_service.run_traceroute(target_ip),
+        network_path_service.measure_endpoint(hostname, target_ip, monitor_port, scheme_hint),
+    )
+
+    if trace_result["probe_method"] == "unavailable":
+        return TracerouteResponse(
+            monitor_id=monitor_id,
+            target=hostname,
+            total_hops=0,
+            destination_reached=endpoint_result["tcp_reachable"],
+            failure_hop=None,
+            hops=[],
+            analysis={
+                "status": "degraded",
+                "issue": "ICMP raw-socket probing unavailable in this environment (missing CAP_NET_RAW)",
+                "recommendation": "Add cap_add: [NET_RAW] to the backend service and rebuild — see docker-compose.yml",
+            },
+            executed_at=now_iso,
+            probe_method="unavailable",
+            dns_resolution_ms=endpoint_result["dns_resolution_ms"],
+            tcp_connect_ms=endpoint_result["tcp_connect_ms"],
+            tls_handshake_ms=endpoint_result["tls_handshake_ms"],
+            target_port=endpoint_result["target_port"],
+            tcp_reachable=endpoint_result["tcp_reachable"],
+        )
+
+    raw_hops = trace_result["hops"]
+    await network_path_service.enrich_hops(raw_hops)
+
+    hops: List[TracerouteHop] = []
+    for h in raw_hops:
+        is_dest = bool(h.get("reached_destination"))
+        status = "success" if h.get("responder_ip") else "timeout"
+        hops.append(TracerouteHop(
+            hop_number=h["hop_number"],
+            hostname=h.get("hostname") or h.get("responder_ip"),
+            ip_address=h.get("responder_ip"),
+            latency_ms=h.get("avg_rtt_ms"),
+            status=status,
+            is_destination=is_dest,
+            location=h.get("location") or None,
+            rtt_samples_ms=h.get("rtt_samples_ms"),
+            packet_loss_pct=h.get("packet_loss_pct"),
+            jitter_ms=h.get("jitter_ms"),
+            asn=h.get("asn"),
+            isp=h.get("isp"),
+            org=h.get("org"),
+            is_proxy_or_vpn=h.get("is_proxy_or_vpn"),
+            is_hosting=h.get("is_hosting"),
+        ))
+
+    loss_values = [h.packet_loss_pct for h in hops if h.packet_loss_pct is not None]
+    jitter_values = [h.jitter_ms for h in hops if h.jitter_ms is not None]
+    avg_loss = round(sum(loss_values) / len(loss_values), 1) if loss_values else None
+    avg_jitter = round(sum(jitter_values) / len(jitter_values), 2) if jitter_values else None
+
+    hop_ips = [h.ip_address for h in hops]
+    routing_loop = network_path_service.detect_routing_loop(hop_ips)
+
+    previous_hop_ips = None
+    route_changed = None
+    try:
+        await _ensure_history_indexes()
+        prev_doc = await db.traceroute_history.find_one(
+            {"monitor_id": monitor_id}, {"_id": 0}, sort=[("executed_at", -1)]
+        )
+        if prev_doc:
+            previous_hop_ips = prev_doc.get("hop_ips")
+            route_changed = network_path_service.detect_route_change(hop_ips, previous_hop_ips)
+        await db.traceroute_history.insert_one({
+            "id": str(uuid.uuid4()),
+            "monitor_id": monitor_id,
+            "tenant_id": tid,
+            "target": hostname,
+            "target_ip": target_ip,
+            "hop_ips": hop_ips,
+            "destination_reached": trace_result["destination_reached"],
+            "executed_at": now_iso,
         })
-    
+    except Exception as e:
+        logger.debug(f"traceroute_history read/write skipped: {e}")
+
+    blocked_likely = network_path_service.detect_blocked_likely(
+        raw_hops, trace_result["destination_reached"], endpoint_result["tcp_reachable"]
+    )
+
+    if routing_loop:
+        analysis = {"status": "unhealthy", "issue": "Routing loop detected",
+                    "warning": f"IP {routing_loop['looped_ip']} seen again at hop {routing_loop['repeat_hop']} "
+                               f"(first seen at hop {routing_loop['first_hop']})"}
+    elif blocked_likely:
+        analysis = {"status": "unhealthy", "issue": "Path likely blocked by a firewall/WAF",
+                    "warning": "Hops stopped responding and the service port is also unreachable",
+                    "failure_point": f"hop {trace_result.get('failure_hop')}" if trace_result.get("failure_hop") else None}
+    elif not trace_result["destination_reached"]:
+        analysis = {"status": "unhealthy", "issue": "Destination not reached",
+                    "failure_point": f"hop {trace_result.get('failure_hop')}" if trace_result.get("failure_hop") else None}
+    elif (avg_loss or 0) > 0 or route_changed:
+        msg = []
+        if avg_loss:
+            msg.append(f"{avg_loss}% average packet loss across hops")
+        if route_changed:
+            msg.append("network path changed since the previous trace")
+        analysis = {"status": "connected_with_warnings", "warning": "; ".join(msg)}
+    else:
+        analysis = {"status": "healthy", "message": "Network path is healthy",
+                    "avg_latency": round(sum(h.latency_ms for h in hops if h.latency_ms is not None) / max(len([h for h in hops if h.latency_ms is not None]), 1), 2) if hops else None}
+
     return TracerouteResponse(
         monitor_id=monitor_id,
-        target=target,
-        total_hops=num_hops,
-        destination_reached=True,
-        failure_hop=None,
+        target=hostname,
+        total_hops=len(hops),
+        destination_reached=trace_result["destination_reached"],
+        failure_hop=trace_result.get("failure_hop"),
         hops=hops,
-        analysis={"status": "healthy", "avg_latency": round(sum(h["latency_ms"] for h in hops) / len(hops), 2)},
-        executed_at=datetime.now(timezone.utc).isoformat()
+        analysis=analysis,
+        executed_at=now_iso,
+        probe_method=trace_result["probe_method"],
+        dns_resolution_ms=endpoint_result["dns_resolution_ms"],
+        tcp_connect_ms=endpoint_result["tcp_connect_ms"],
+        tls_handshake_ms=endpoint_result["tls_handshake_ms"],
+        target_port=endpoint_result["target_port"],
+        tcp_reachable=endpoint_result["tcp_reachable"],
+        avg_packet_loss_pct=avg_loss,
+        avg_jitter_ms=avg_jitter,
+        routing_loop_detected=bool(routing_loop),
+        routing_loop_detail=routing_loop,
+        route_changed=route_changed,
+        previous_hop_ips=previous_hop_ips,
+        blocked_likely=blocked_likely,
     )
+
+
+_history_index_ready = False
+
+
+async def _ensure_history_indexes():
+    global _history_index_ready
+    if _history_index_ready:
+        return
+    try:
+        await db.traceroute_history.create_index([("monitor_id", 1), ("executed_at", -1)], name="mon_time")
+        await db.traceroute_history.create_index("executed_at", expireAfterSeconds=90 * 24 * 3600, name="history_ttl")
+        _history_index_ready = True
+    except Exception as e:
+        logger.debug(f"traceroute_history index create skipped: {e}")

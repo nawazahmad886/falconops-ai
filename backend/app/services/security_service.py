@@ -25,6 +25,7 @@ _user_hosts = defaultdict(list)  # user -> [(host, timestamp)] — lateral-movem
 _api_call_counts = defaultdict(list)  # user_or_ip -> [timestamps] — per-minute API call tracker
 _ip_failed_users = defaultdict(list)  # ip -> [(user, timestamp)] — credential-stuffing tracker
 _signup_attempts = defaultdict(list)  # ip -> [timestamps] — signup-abuse tracker
+_port_connections = defaultdict(list)  # (host, local_port) -> [(remote_ip, timestamp)] — netflow scan tracker
 BRUTE_FORCE_THRESHOLD = 5
 BRUTE_FORCE_WINDOW_MINUTES = 10
 LATERAL_MOVEMENT_HOST_THRESHOLD = 3
@@ -35,6 +36,8 @@ SIGNUP_ABUSE_THRESHOLD = 5
 SIGNUP_ABUSE_WINDOW_MINUTES = 30
 ACCOUNT_TAKEOVER_RISK_THRESHOLD = 50
 ACCOUNT_TAKEOVER_HISTORY_DAYS = 90
+NETFLOW_SCAN_DISTINCT_IP_THRESHOLD = 15
+NETFLOW_SCAN_WINDOW_MINUTES = 5
 
 # Known automation/headless-browser/scripting client signatures — a coarse but real
 # signal (not a fabricated one): legitimate browsers never send these tokens.
@@ -297,6 +300,85 @@ class ThreatDetectionEngine:
                 "mitre_technique": mitre.get("mitre_technique", "T1190 - Exploit Public-Facing Application"),
             }
         return None
+
+    async def _check_netflow_malicious_ip(self, flow: Dict, ioc_match: Dict) -> Dict:
+        """Same shape/severity as _check_malicious_ip, but sourced from an oneagent
+        network flow rather than an HTTP/auth event — the ioc_match is passed in
+        already-fetched (network_flow_service already called threat_intel_service for
+        enrichment) so this never re-queries threat intel."""
+        ip = flow.get("remote_ip", "unknown")
+        mitre = mitre_mapping_service.classify_mitre_primary("malicious ip known bad ip blocklisted ip") or {}
+        return {
+            "id": str(uuid.uuid4()),
+            "type": "malicious_ip",
+            "severity": "critical",
+            "source_ip": ip,
+            "message": f"Outbound connection to known malicious IP: {ip} from {flow.get('host', 'unknown host')} "
+                       f"(source: {ioc_match.get('source')}, {ioc_match.get('malware_family') or 'threat intel match'})",
+            "ioc_source": ioc_match.get("source"),
+            "malware_family": ioc_match.get("malware_family"),
+            "host": flow.get("host"),
+            "service": flow.get("service"),
+            "detection_source": "netflow",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "status": "active",
+            "mitre_tactic": mitre.get("mitre_tactic", "Command and Control"),
+            "mitre_technique": mitre.get("mitre_technique", "T1071 - Application Layer Protocol"),
+        }
+
+    async def _check_netflow_scan_pattern(self, flow: Dict) -> Optional[Dict]:
+        """Flags a local port receiving connections from many distinct remote IPs in a
+        short window — a real but LIMITED signal: since netflow data is a periodic
+        /proc/net/tcp snapshot (not continuous packet capture), a fast single-pass port
+        scan can complete entirely between polling ticks and go undetected. This catches
+        sustained/repeated scanning, not every scan."""
+        host = flow.get("host", "unknown")
+        local_port = flow.get("local_port")
+        remote_ip = flow.get("remote_ip")
+        if not local_port or not remote_ip:
+            return None
+        now = datetime.now(timezone.utc)
+        cutoff = now - timedelta(minutes=NETFLOW_SCAN_WINDOW_MINUTES)
+        key = (host, local_port)
+
+        _port_connections[key] = [(ip, t) for ip, t in _port_connections[key] if t > cutoff]
+        _port_connections[key].append((remote_ip, now))
+
+        distinct_ips = {ip for ip, _ in _port_connections[key]}
+        if len(distinct_ips) >= NETFLOW_SCAN_DISTINCT_IP_THRESHOLD:
+            mitre = mitre_mapping_service.classify_mitre_primary("port scan network scanning reconnaissance") or {}
+            return {
+                "id": str(uuid.uuid4()),
+                "type": "port_scan",
+                "severity": "medium",
+                "source_ip": remote_ip,
+                "message": f"Possible scanning activity: {host}:{local_port} received connections from "
+                           f"{len(distinct_ips)} distinct IPs in {NETFLOW_SCAN_WINDOW_MINUTES}min",
+                "host": host,
+                "local_port": local_port,
+                "distinct_ip_count": len(distinct_ips),
+                "detection_source": "netflow",
+                "timestamp": now.isoformat(),
+                "status": "active",
+                "mitre_tactic": mitre.get("mitre_tactic", "Reconnaissance"),
+                "mitre_technique": mitre.get("mitre_technique", "T1595 - Active Scanning"),
+            }
+        return None
+
+    async def process_netflow(self, flow: Dict, ioc_match: Optional[Dict] = None) -> Optional[List[Dict]]:
+        """Entry point for oneagent-reported network flows (backend/app/services/
+        network_flow_service.py), mirroring ingest_security_event's process_event call
+        below but for flow data instead of auth/API events. ioc_match is passed in
+        already-fetched to avoid a second threat_intel lookup."""
+        threats = []
+        if ioc_match:
+            threats.append(await self._check_netflow_malicious_ip(flow, ioc_match))
+        scan = await self._check_netflow_scan_pattern(flow)
+        if scan:
+            threats.append(scan)
+        for threat in threats:
+            await self._store_threat(threat)
+        return threats if threats else None
 
     async def _check_lateral_movement(self, event: Dict) -> Optional[Dict]:
         """Flag a user authenticating to many distinct hosts in a short window —

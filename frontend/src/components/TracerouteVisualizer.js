@@ -150,7 +150,33 @@ const HopNode = ({ hop, index, isLast, showDetails, onHover }) => {
                         {hop.location && (
                             <span className="text-xs text-white/40">{hop.location}</span>
                         )}
+                        {hop.packet_loss_pct !== null && hop.packet_loss_pct !== undefined && hop.packet_loss_pct > 0 && (
+                            <span className="text-xs font-mono text-red-400">{hop.packet_loss_pct}% loss</span>
+                        )}
+                        {hop.jitter_ms !== null && hop.jitter_ms !== undefined && (
+                            <span className="text-xs font-mono text-white/40">±{hop.jitter_ms}ms jitter</span>
+                        )}
                     </div>
+
+                    {(hop.asn || hop.isp || hop.is_proxy_or_vpn || hop.is_hosting) && (
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                            {(hop.asn || hop.isp) && (
+                                <span className="text-[10px] font-mono text-white/30 truncate">
+                                    {hop.asn || hop.isp}
+                                </span>
+                            )}
+                            {hop.is_proxy_or_vpn && (
+                                <Badge className="bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[9px] uppercase">
+                                    VPN/Proxy
+                                </Badge>
+                            )}
+                            {hop.is_hosting && (
+                                <Badge className="bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[9px] uppercase">
+                                    Hosting
+                                </Badge>
+                            )}
+                        </div>
+                    )}
                 </div>
                 
                 {/* Status Icon */}
@@ -163,13 +189,13 @@ const HopNode = ({ hop, index, isLast, showDetails, onHover }) => {
     );
 };
 
-const AnalysisPanel = ({ analysis, destinationReached }) => {
+const AnalysisPanel = ({ analysis, destinationReached, routingLoopDetected, routeChanged, blockedLikely }) => {
     if (!analysis) return null;
-    
+
     const isHealthy = destinationReached && analysis.status === 'healthy';
     const hasWarning = analysis.status === 'connected_with_warnings';
     const hasError = !destinationReached || analysis.issue;
-    
+
     return (
         <motion.div
             initial={{ opacity: 0, y: 20 }}
@@ -190,14 +216,31 @@ const AnalysisPanel = ({ analysis, destinationReached }) => {
                     <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0 mt-0.5" />
                 )}
                 <div>
-                    <h4 className={`font-bold text-sm uppercase mb-1 ${
-                        isHealthy ? 'text-green-400' :
-                        hasWarning ? 'text-yellow-400' : 'text-red-400'
-                    }`}>
-                        {isHealthy ? 'Network Path Healthy' :
-                         hasWarning ? 'Network Warning' :
-                         'Network Issue Detected'}
-                    </h4>
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <h4 className={`font-bold text-sm uppercase ${
+                            isHealthy ? 'text-green-400' :
+                            hasWarning ? 'text-yellow-400' : 'text-red-400'
+                        }`}>
+                            {isHealthy ? 'Network Path Healthy' :
+                             hasWarning ? 'Network Warning' :
+                             'Network Issue Detected'}
+                        </h4>
+                        {routingLoopDetected && (
+                            <Badge className="bg-red-500/20 text-red-300 border border-red-500/30 text-[9px] uppercase">
+                                Routing Loop
+                            </Badge>
+                        )}
+                        {routeChanged && (
+                            <Badge className="bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 text-[9px] uppercase">
+                                Route Changed
+                            </Badge>
+                        )}
+                        {blockedLikely && (
+                            <Badge className="bg-red-500/20 text-red-300 border border-red-500/30 text-[9px] uppercase">
+                                Likely Blocked
+                            </Badge>
+                        )}
+                    </div>
                     <p className="text-white/70 text-sm">
                         {analysis.message || analysis.issue || analysis.warning}
                     </p>
@@ -326,6 +369,40 @@ export const TracerouteVisualizer = ({
                             {traceData.failure_hop || '--'}
                         </p>
                     </div>
+                    {traceData.avg_packet_loss_pct !== null && traceData.avg_packet_loss_pct !== undefined && (
+                        <div className="p-3 bg-white/5 rounded-sm border border-white/10">
+                            <p className="text-[10px] text-white/40 uppercase mb-1">Avg Packet Loss</p>
+                            <p className={`font-heading font-bold text-xl ${traceData.avg_packet_loss_pct > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                                {traceData.avg_packet_loss_pct}%
+                            </p>
+                        </div>
+                    )}
+                    {traceData.avg_jitter_ms !== null && traceData.avg_jitter_ms !== undefined && (
+                        <div className="p-3 bg-white/5 rounded-sm border border-white/10">
+                            <p className="text-[10px] text-white/40 uppercase mb-1">Avg Jitter</p>
+                            <p className="font-heading font-bold text-xl text-cyan-400">
+                                {traceData.avg_jitter_ms}ms
+                            </p>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* DNS / TCP / TLS Timing Breakdown */}
+            {traceData && !loading && (traceData.dns_resolution_ms != null || traceData.tcp_connect_ms != null || traceData.tls_handshake_ms != null) && (
+                <div className="flex items-center gap-4 p-3 bg-white/5 rounded-sm border border-white/10 text-xs font-mono">
+                    {traceData.dns_resolution_ms != null && (
+                        <span className="text-white/50">DNS <span className="text-white">{traceData.dns_resolution_ms}ms</span></span>
+                    )}
+                    {traceData.tcp_connect_ms != null && (
+                        <span className="text-white/50">TCP <span className="text-white">{traceData.tcp_connect_ms}ms</span></span>
+                    )}
+                    {traceData.tls_handshake_ms != null && (
+                        <span className="text-white/50">TLS <span className="text-white">{traceData.tls_handshake_ms}ms</span></span>
+                    )}
+                    <span className={traceData.tcp_reachable ? 'text-green-400' : 'text-red-400'}>
+                        {traceData.tcp_reachable ? 'Port Reachable' : 'Port Unreachable'}
+                    </span>
                 </div>
             )}
             
@@ -384,6 +461,9 @@ export const TracerouteVisualizer = ({
                     <AnalysisPanel
                         analysis={traceData.analysis}
                         destinationReached={traceData.destination_reached}
+                        routingLoopDetected={traceData.routing_loop_detected}
+                        routeChanged={traceData.route_changed}
+                        blockedLikely={traceData.blocked_likely}
                     />
                     
                     {/* Timestamp */}

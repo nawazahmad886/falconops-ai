@@ -32,6 +32,7 @@ type Config struct {
 	TLS            TLSConfig  `yaml:"tls"`
 
 	MetricsIntervalSec int    `yaml:"metrics_interval_sec"`
+	NetflowIntervalSec int    `yaml:"netflow_interval_sec"`
 	BatchMaxEvents     int    `yaml:"batch_max_events"`
 	BatchMaxWaitSec    int    `yaml:"batch_max_wait_sec"`
 	BufferDir          string `yaml:"buffer_dir"`
@@ -52,6 +53,7 @@ func defaults() *Config {
 		SamplingRate:       1.0,
 		LogFilters:         LogFilters{MinLevel: "info"},
 		MetricsIntervalSec: 30,
+		NetflowIntervalSec: 20,
 		BatchMaxEvents:     500,
 		BatchMaxWaitSec:    5,
 		BufferDir:          "/var/lib/falconops/buffer",
@@ -110,6 +112,13 @@ func (c *Config) MetricsInterval() time.Duration {
 		return 30 * time.Second
 	}
 	return time.Duration(c.MetricsIntervalSec) * time.Second
+}
+
+func (c *Config) NetflowInterval() time.Duration {
+	if c.NetflowIntervalSec < 5 {
+		return 20 * time.Second
+	}
+	return time.Duration(c.NetflowIntervalSec) * time.Second
 }
 
 func (c *Config) PluginEnabled(name string) bool {

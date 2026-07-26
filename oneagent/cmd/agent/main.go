@@ -19,6 +19,7 @@ import (
 	"github.com/falconops/oneagent/pkg/plugins"
 	"github.com/falconops/oneagent/pkg/plugins/logs"
 	"github.com/falconops/oneagent/pkg/plugins/metrics"
+	"github.com/falconops/oneagent/pkg/plugins/netflow"
 	"github.com/falconops/oneagent/pkg/plugins/traces"
 	"github.com/falconops/oneagent/pkg/transport"
 )
@@ -65,6 +66,7 @@ func main() {
 	registry := plugins.NewRegistry(logger)
 	registry.Register(logs.New(cfg, pipe, logger))
 	registry.Register(metrics.New(cfg, pipe, disc, logger))
+	registry.Register(netflow.New(cfg, pipe, disc, logger))
 	registry.Register(traces.New(cfg, pipe, logger))
 	registry.StartEnabled(ctx, cfg.EnabledPlugins)
 
