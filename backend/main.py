@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # Import routers
 from app.routes import all_routers
 from app.services.websocket_manager import ws_manager
-from app.services.soc_live_feed import soc_manager, get_recent_feed
+from app.services.soc_live_feed import soc_manager
 from app.services.monitoring_service import start_monitoring_scheduler, stop_monitoring_scheduler
 from app.services.uptime_monitor_service import start_uptime_scheduler, stop_uptime_scheduler
 from app.services.reports_service import start_report_scheduler, stop_report_scheduler
@@ -51,6 +51,14 @@ from app.services import soc_ingestion_service
 # runbooks automatically until now)
 from app.services import workflow_trigger_service
 
+# Import the Connector SDK — importing the package registers every built-in
+# connector (Prometheus, AWS CloudTrail/VPC Flow Logs) into CONNECTOR_REGISTRY
+# as an import side-effect (see app/connectors/__init__.py).
+from app import connectors as connector_sdk  # noqa: F401
+from app.connectors.ai_tool_bridge import register_ai_context_tools
+from app.connectors.crypto import migrate_legacy_integrations
+from app.connectors.scheduler import connector_poll_scheduler
+
 # Background task for metrics processor
 metrics_processor_task = None
 
@@ -69,6 +77,9 @@ generic_ingestion_task = None
 # Background task for the workflow builder's schedule-trigger executor
 runbook_schedule_task = None
 
+# Background task for the Connector SDK's polling scheduler
+connector_poll_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -76,6 +87,7 @@ async def lifespan(app: FastAPI):
     global metrics_processor_task, kafka_consumer_task, sla_breach_task
     global threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task
     global runbook_schedule_task
+    global connector_poll_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -152,6 +164,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"AI-SOC scheduler init warning: {e}")
 
+    # Connector SDK: one-time legacy secret migration (idempotent, safe to run every
+    # boot — see app/connectors/crypto.py), AI-tool auto-registration for every
+    # AIContextCapable connector, and the poll scheduler for Metrics/Events/Topology
+    # capable connectors (Prometheus, AWS CloudTrail/VPC Flow Logs today).
+    try:
+        migration_result = await migrate_legacy_integrations()
+        logger.info(f"Connector secret migration: {migration_result}")
+    except Exception as e:
+        logger.warning(f"Connector secret migration skipped: {e}")
+    try:
+        registered_tools = register_ai_context_tools()
+        connector_poll_task = asyncio.create_task(connector_poll_scheduler())
+        logger.info(f"Connector SDK started ({registered_tools} AI-context tool(s) registered, poll scheduler running)")
+    except Exception as e:
+        logger.warning(f"Connector SDK init warning: {e}")
+
     # Workflow builder: schedule-trigger executor. Fixes a real pre-existing gap —
     # runbook.schedule.next_run was computed and stored by the manual
     # POST /runbooks/scheduled/execute endpoint, but nothing called it on a timer.
@@ -207,8 +235,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    # Stop AI-SOC schedulers
-    for task in (threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task):
+    # Stop AI-SOC schedulers + the Connector SDK poll scheduler
+    for task in (threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task, connector_poll_task):
         if task:
             task.cancel()
             try:
@@ -338,29 +366,32 @@ for router in all_routers:
 @app.websocket("/ws/alerts")
 async def websocket_alerts(websocket: WebSocket):
     """WebSocket endpoint for real-time alert streaming"""
-    await ws_manager.connect(websocket)
+    if not await ws_manager.connect(websocket):
+        return
     try:
         while True:
             await websocket.receive_text()
             # Echo back or handle client messages if needed
     except WebSocketDisconnect:
-        ws_manager.disconnect(websocket)
+        pass
+    finally:
+        await ws_manager.disconnect(websocket)
 
 
 # SOC Live Feed WebSocket endpoint
 @app.websocket("/ws/soc-feed")
 async def websocket_soc_feed(websocket: WebSocket):
     """WebSocket endpoint for real-time SOC threat feed"""
-    await soc_manager.connect(websocket)
+    # Initial feed snapshot is sent automatically by soc_manager's on_connect hook.
+    if not await soc_manager.connect(websocket):
+        return
     try:
-        # Send initial feed on connect
-        import json
-        recent = await get_recent_feed(30)
-        await websocket.send_text(json.dumps({"type": "initial", "data": recent}))
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
-        soc_manager.disconnect(websocket)
+        pass
+    finally:
+        await soc_manager.disconnect(websocket)
 
 
 # Health check endpoint

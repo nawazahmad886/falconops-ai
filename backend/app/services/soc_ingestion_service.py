@@ -31,6 +31,8 @@ def normalize_event(raw: Dict) -> Dict:
         "status": "new",
         "correlated": False,
         "incident_id": None,
+        "assigned_to": None,
+        "assignment_group": None,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -68,6 +70,16 @@ async def ingest_event(raw: Dict) -> Dict:
         })
     except Exception as e:
         logger.debug(f"WS broadcast skip: {e}")
+
+    try:
+        from .problems_broadcaster import broadcast_problem_event
+        await broadcast_problem_event(
+            event_type="problem.created", problem_id=f"se:{event['event_id']}",
+            severity=event.get("severity"), status=event.get("status"),
+            title=event.get("message"), source="soc_event",
+        )
+    except Exception:
+        pass
 
     return {
         "status": "ingested",
@@ -176,6 +188,8 @@ async def create_incident(trigger_event: Dict, event_count: int) -> Dict:
         "status": "open",
         "confidence": min(99, 50 + event_count * 10),
         "ai_analysis": None,
+        "assigned_to": None,
+        "assignment_group": None,
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.soc_incidents.insert_one(incident)
@@ -185,6 +199,16 @@ async def create_incident(trigger_event: Dict, event_count: int) -> Dict:
     try:
         from .soc_live_feed import soc_manager
         await soc_manager.broadcast({"type": "incident", "data": incident})
+    except Exception:
+        pass
+
+    try:
+        from .problems_broadcaster import broadcast_problem_event
+        asyncio.create_task(broadcast_problem_event(
+            event_type="problem.created", problem_id=f"si:{incident['incident_id']}",
+            severity=incident.get("severity"), status=incident.get("status"),
+            title=incident.get("title"), source="soc_incident",
+        ))
     except Exception:
         pass
 
@@ -213,6 +237,134 @@ async def _trigger_ai_on_incident(incident: Dict):
         })
     except Exception as e:
         logger.error(f"AI trigger on incident failed: {e}")
+
+
+# ======================== LIFECYCLE ACTIONS (Problems console) ========================
+# soc_events/soc_incidents had no acknowledge/resolve/close/assign path at all before
+# this — event.status was always "new", incident.status was always "open". These are
+# genuinely new lifecycle transitions, not a reuse of existing logic. Confirmed safe:
+# no other code path reads/depends on those values staying fixed.
+
+async def _broadcast_soc_event(prefix: str, raw_id: str, doc: Dict, event_type: str, source: str):
+    try:
+        from .problems_broadcaster import broadcast_problem_event
+        await broadcast_problem_event(
+            event_type=event_type, problem_id=f"{prefix}:{raw_id}",
+            severity=doc.get("severity"), status=doc.get("status"),
+            title=doc.get("message") or doc.get("title"), source=source,
+        )
+    except Exception:
+        pass
+
+
+async def acknowledge_event(event_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_events.find_one_and_update(
+        {"event_id": event_id, "status": "new"},
+        {"$set": {"status": "acknowledged", "acknowledged_by": user_email,
+                   "acknowledged_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("se", event_id, clean, "problem.updated", "soc_event"))
+        return clean
+    return None
+
+
+async def resolve_event(event_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_events.find_one_and_update(
+        {"event_id": event_id, "status": {"$in": ["new", "acknowledged"]}},
+        {"$set": {"status": "resolved", "resolved_by": user_email,
+                   "resolved_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("se", event_id, clean, "problem.updated", "soc_event"))
+        return clean
+    return None
+
+
+async def close_event(event_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_events.find_one_and_update(
+        {"event_id": event_id, "status": "resolved"},
+        {"$set": {"status": "closed", "closed_by": user_email,
+                   "closed_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("se", event_id, clean, "problem.updated", "soc_event"))
+        return clean
+    return None
+
+
+async def assign_event(event_id: str, assigned_to: Optional[str], assignment_group: Optional[str]) -> Optional[Dict]:
+    result = await db.soc_events.find_one_and_update(
+        {"event_id": event_id},
+        {"$set": {"assigned_to": assigned_to, "assignment_group": assignment_group}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("se", event_id, clean, "problem.assigned", "soc_event"))
+        return clean
+    return None
+
+
+async def acknowledge_soc_incident(incident_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_incidents.find_one_and_update(
+        {"incident_id": incident_id, "status": "open"},
+        {"$set": {"status": "acknowledged", "acknowledged_by": user_email,
+                   "acknowledged_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("si", incident_id, clean, "problem.updated", "soc_incident"))
+        return clean
+    return None
+
+
+async def resolve_soc_incident(incident_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_incidents.find_one_and_update(
+        {"incident_id": incident_id, "status": {"$in": ["open", "acknowledged"]}},
+        {"$set": {"status": "resolved", "resolved_by": user_email,
+                   "resolved_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("si", incident_id, clean, "problem.updated", "soc_incident"))
+        return clean
+    return None
+
+
+async def close_soc_incident(incident_id: str, user_email: str) -> Optional[Dict]:
+    result = await db.soc_incidents.find_one_and_update(
+        {"incident_id": incident_id, "status": "resolved"},
+        {"$set": {"status": "closed", "closed_by": user_email,
+                   "closed_at": datetime.now(timezone.utc).isoformat()}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("si", incident_id, clean, "problem.updated", "soc_incident"))
+        return clean
+    return None
+
+
+async def assign_soc_incident(incident_id: str, assigned_to: Optional[str], assignment_group: Optional[str]) -> Optional[Dict]:
+    result = await db.soc_incidents.find_one_and_update(
+        {"incident_id": incident_id},
+        {"$set": {"assigned_to": assigned_to, "assignment_group": assignment_group}},
+        return_document=True,
+    )
+    if result:
+        clean = {k: v for k, v in result.items() if k != "_id"}
+        asyncio.create_task(_broadcast_soc_event("si", incident_id, clean, "problem.assigned", "soc_incident"))
+        return clean
+    return None
 
 
 # ======================== QUERIES ========================

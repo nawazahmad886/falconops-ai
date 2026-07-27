@@ -475,20 +475,16 @@ async def block_quarantine(event_id: str, user: dict = Depends(require_auth)) ->
 
 
 # ─── Live WebSocket feed ─────────────────────────────────────────────────────
+# Auth + hello-message hooks assigned onto the shared BroadcastManager singleton
+# at import time (they need _AGENT_FLAG_FIELDS, which lives in this module).
 
-@router.websocket("/live")
-async def live_feed(ws: WebSocket):
-    """WebSocket: every new AI monitoring event broadcasts here.
-    Lightweight token gate — pass `?token=<jwt>` to authenticate."""
-    # NOTE: we accept the connection first so we can send a structured close on auth failure.
-    await ws.accept()
+async def _live_authenticate(ws: WebSocket) -> bool:
+    """Lightweight token gate — pass `?token=<jwt>` to authenticate."""
     token = ws.query_params.get("token") or ""
     if not token:
         await ws.send_json({"type": "error", "error": "missing token"})
         await ws.close()
-        return
-
-    # Validate the JWT using the same helper the REST routes use
+        return False
     try:
         import jwt
         from ..core.config import JWT_SECRET, JWT_ALGORITHM
@@ -496,15 +492,28 @@ async def live_feed(ws: WebSocket):
     except Exception:
         await ws.send_json({"type": "error", "error": "invalid token"})
         await ws.close()
-        return
+        return False
+    return True
 
-    await broadcaster.register(ws)
-    await ws.send_json({
+
+async def _live_hello(ws: WebSocket) -> Dict[str, Any]:
+    return {
         "type": "ai_monitoring.hello",
         "subscribers": broadcaster.client_count,
         "agents": list(_AGENT_FLAG_FIELDS.keys()) + ["root_cause"],
         "server_time": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+
+
+broadcaster.authenticate = _live_authenticate
+broadcaster.on_connect = _live_hello
+
+
+@router.websocket("/live")
+async def live_feed(ws: WebSocket):
+    """WebSocket: every new AI monitoring event broadcasts here."""
+    if not await broadcaster.connect(ws):
+        return
     try:
         while True:
             # Keep the socket alive — we don't actually need client messages
@@ -516,4 +525,4 @@ async def live_feed(ws: WebSocket):
     except Exception:
         pass
     finally:
-        await broadcaster.unregister(ws)
+        await broadcaster.disconnect(ws)

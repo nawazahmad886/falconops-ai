@@ -107,6 +107,8 @@ class SmartCorrelationEngine:
                 "timeline": [{"timestamp": now_iso, "action": "created", "user": "system:smart_correlation", "details": f"Auto-correlated: {group['reason']}"}],
                 "assignee": None,
                 "team": None,
+                "assigned_to": None,
+                "assignment_group": None,
                 "priority_score": self._priority_score(inc_severity, len(services)),
                 "sla_breach_at": None,
                 "is_sla_breached": False,
@@ -120,6 +122,16 @@ class SmartCorrelationEngine:
 
             clean = {k: v for k, v in incident_doc.items() if k != "_id"}
             created.append(clean)
+
+            try:
+                from .problems_broadcaster import broadcast_problem_event
+                asyncio.create_task(broadcast_problem_event(
+                    event_type="problem.created", problem_id=f"ie:{incident_id}",
+                    severity=inc_severity, status="active", title=incident_doc["title"],
+                    source="smart_correlation_engine",
+                ))
+            except Exception:
+                pass
 
             # Autonomous investigation — fire-and-forget, must never affect incident
             # creation. This incident is a real db.incidents_engine record, so the

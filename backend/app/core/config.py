@@ -36,5 +36,11 @@ else:
 JWT_ALGORITHM = os.environ.get('JWT_ALGORITHM', 'HS256')
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get('ACCESS_TOKEN_EXPIRE_MINUTES', 1440))
 
+# Connector SDK secret-at-rest encryption key (see app/connectors/crypto.py). Empty
+# string if unset — crypto.py falls back to a key persisted in Mongo rather than
+# failing startup, since a missing var here isn't a forgeability risk the way an
+# empty JWT secret would be.
+CONNECTOR_SECRET_KEY = os.environ.get('CONNECTOR_SECRET_KEY', '')
+
 # Re-export database
 from .database import db, get_database as get_db, close_database

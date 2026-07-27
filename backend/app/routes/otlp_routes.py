@@ -22,15 +22,17 @@ configured with OTEL_EXPORTER_OTLP_PROTOCOL=http/json.
 """
 import logging
 import uuid
+import jwt
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Any
 
-from fastapi import APIRouter, Request, HTTPException, Depends, Query
+from fastapi import APIRouter, Request, HTTPException, Depends, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from ..core.database import db
+from ..core.config import JWT_SECRET, JWT_ALGORITHM
 from ..utils.auth import require_auth
-from ..services import trace_rca_service, trace_alert_engine
+from ..services import trace_rca_service, trace_alert_engine, call_flow_broadcaster
 from ..services.topology_service import topology_service
 from ..services.metrics_timeseries_service import metrics_timeseries_service
 
@@ -252,6 +254,21 @@ async def _persist_spans(spans: List[Dict]):
                 parent = parent_doc
         if not parent or parent["service"] == s["service"]:
             continue
+
+        # Broadcast one live event per real cross-service span, BEFORE the
+        # edges_seen dedup below — a single OTLP batch commonly contains many
+        # real spans on the same edge, and every one of them should animate,
+        # not just the first (the dedup below exists only to avoid redundant
+        # DB upserts, not to throttle how many real calls actually happened).
+        try:
+            await call_flow_broadcaster.broadcast_call_event(
+                source=parent["service"], target=s["service"], status=s["status"],
+                duration_ms=s.get("duration_ms"), operation=s.get("operation") or "",
+                trace_id=s["trace_id"], span_id=s["span_id"],
+            )
+        except Exception as e:
+            logger.debug(f"call_flow broadcast failed (non-fatal): {e}")
+
         edge_key = (parent["service"], s["service"])
         if edge_key in edges_seen:
             continue
@@ -446,6 +463,48 @@ async def list_dependencies(hours: int = Query(24, ge=1, le=168),
     nodes = [{"name": name, **node_metrics.get(name, empty_metrics)} for name in node_names]
 
     return {"nodes": nodes, "edges": edges, "node_count": len(nodes), "edge_count": len(edges)}
+
+
+# ─────────────────────────────────────────────────────
+#  Live Call Flow — WebSocket push of real-time cross-service call events
+# ─────────────────────────────────────────────────────
+
+async def _call_flow_authenticate(ws: WebSocket) -> bool:
+    """Lightweight token gate — pass `?token=<jwt>` to authenticate, same
+    pattern as /api/ai-monitoring/live."""
+    token = ws.query_params.get("token") or ""
+    if not token:
+        await ws.send_json({"type": "error", "error": "missing token"})
+        await ws.close()
+        return False
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        await ws.send_json({"type": "error", "error": "invalid token"})
+        await ws.close()
+        return False
+    return True
+
+
+call_flow_broadcaster.call_flow_manager.authenticate = _call_flow_authenticate
+
+
+@trace_router.websocket("/live")
+async def call_flow_live(ws: WebSocket):
+    """WebSocket: one message per real cross-service span detected during
+    OTLP trace ingestion (see the broadcast call inside _persist_spans above).
+    No initial-state replay — the base graph is served by
+    GET /api/traces/services/dependencies on page load; individual call
+    events are inherently transient."""
+    if not await call_flow_broadcaster.call_flow_manager.connect(ws):
+        return
+    try:
+        while True:
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await call_flow_broadcaster.call_flow_manager.disconnect(ws)
 
 
 @trace_router.get("/services/{service_name}/correlation")

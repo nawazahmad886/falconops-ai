@@ -8,7 +8,11 @@ from pydantic import BaseModel
 
 from ..utils.auth import require_auth, require_admin
 from ..services.aws_connectors import fetch_aws_events, CloudTrailConnector, VPCFlowLogConnector
+from ..services.integration_management_service import save_integration, INTEGRATION_CATALOG
+from ..connectors.crypto import decrypt_config_secrets
 from ..core.database import db
+
+_CATALOG_BY_ID = {c["id"]: c for c in INTEGRATION_CATALOG}
 
 router = APIRouter(prefix="/api/aws", tags=["AWS Connectors"])
 
@@ -51,23 +55,28 @@ async def list_connectors(current_user: dict = Depends(require_auth)):
 
 @router.post("/connectors")
 async def configure_connector(config: AWSConnectorConfig, current_user: dict = Depends(require_admin)):
-    """Configure an AWS connector"""
+    """Configure an AWS connector.
+
+    Delegates to integration_management_service.save_integration() (the same
+    path PUT /api/admin/integrations/{id} uses) instead of writing db.integrations
+    directly — previously this route bypassed that service entirely, which meant
+    AWS secrets saved here never went through the secret-encryption-at-rest layer
+    (app/connectors/crypto.py) that PUT /api/admin/integrations/{id} does. Request/
+    response JSON shape is unchanged for the frontend."""
     integration_id = f"aws_{config.connector_type}"
-    doc = {
-        "integration_id": integration_id,
-        "enabled": config.enabled,
-        "config": {
+    result = await save_integration(
+        integration_id,
+        {
             "aws_access_key": config.aws_access_key,
             "aws_secret_key": config.aws_secret_key,
             "aws_region": config.aws_region,
             "log_group": config.log_group,
         },
-    }
-    await db.integrations.update_one(
-        {"integration_id": integration_id},
-        {"$set": doc},
-        upsert=True,
+        config.enabled,
+        current_user.get("email"),
     )
+    if "error" in result:
+        return result
     return {"message": f"Connector {integration_id} configured", "enabled": config.enabled}
 
 
@@ -83,9 +92,12 @@ async def get_cloudtrail_events(
     limit: int = Query(20, le=50),
     current_user: dict = Depends(require_auth),
 ):
-    """Fetch CloudTrail events (uses simulation if no AWS creds)"""
-    config = await db.integrations.find_one({"integration_id": "aws_cloudtrail"}, {"_id": 0})
-    connector = CloudTrailConnector(config.get("config", {}) if config else {})
+    """Fetch CloudTrail events (returns [] if AWS isn't configured/reachable — no simulated data)"""
+    doc = await db.integrations.find_one({"integration_id": "aws_cloudtrail"}, {"_id": 0})
+    raw_config = doc.get("config", {}) if doc else {}
+    config = await decrypt_config_secrets(raw_config, _CATALOG_BY_ID.get("aws_cloudtrail"))
+    connector = CloudTrailConnector(config)
+    await connector.connect()
     return await connector.fetch_events(limit)
 
 
@@ -94,7 +106,10 @@ async def get_vpc_events(
     limit: int = Query(20, le=50),
     current_user: dict = Depends(require_auth),
 ):
-    """Fetch VPC Flow Log events (uses simulation if no AWS creds)"""
-    config = await db.integrations.find_one({"integration_id": "aws_vpc_flowlogs"}, {"_id": 0})
-    connector = VPCFlowLogConnector(config.get("config", {}) if config else {})
+    """Fetch VPC Flow Log events (returns [] if AWS isn't configured/reachable — no simulated data)"""
+    doc = await db.integrations.find_one({"integration_id": "aws_vpc_flowlogs"}, {"_id": 0})
+    raw_config = doc.get("config", {}) if doc else {}
+    config = await decrypt_config_secrets(raw_config, _CATALOG_BY_ID.get("aws_vpc_flowlogs"))
+    connector = VPCFlowLogConnector(config)
+    await connector.connect()
     return await connector.fetch_logs(limit)

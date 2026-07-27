@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from ..core.database import db
+from ..connectors.crypto import encrypt_config_secrets, decrypt_config_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,25 @@ INTEGRATION_CATALOG = [
             {"key": "method", "label": "HTTP Method", "type": "text", "required": False, "default": "POST"},
         ],
     },
+    {
+        "id": "prometheus",
+        "name": "Prometheus",
+        "category": "data_source",
+        "description": "Pull metrics from a Prometheus server via its HTTP query API",
+        "icon": "activity",
+        "fields": [
+            {"key": "prometheus_url", "label": "Prometheus URL", "type": "text", "required": True, "default": "http://localhost:9090"},
+            {"key": "bearer_token", "label": "Bearer Token (optional)", "type": "password", "required": False},
+            {"key": "default_queries", "label": "PromQL Queries (comma-separated)", "type": "text", "required": False, "default": "up"},
+            {"key": "scrape_interval_seconds", "label": "Poll Interval (seconds)", "type": "text", "required": False, "default": "60"},
+        ],
+        # Connector-SDK-backed entries carry these extra fields; absent on the
+        # legacy entries above, which means "config-only, not SDK-connected yet".
+        "vendor": "Prometheus",
+        "version": "1.0.0",
+        "capabilities": ["metrics", "ai_context"],
+        "connector_id": "prometheus",
+    },
 ]
 
 
@@ -172,8 +192,12 @@ async def get_integration(integration_id: str) -> Optional[Dict]:
     if not cfg:
         return None
 
-    # Mask password fields
+    # Decrypt password fields (transparently handles legacy plaintext docs — see
+    # connectors/crypto.py) before the existing display-time masking below.
     catalog_item = next((c for c in INTEGRATION_CATALOG if c["id"] == integration_id), None)
+    cfg["config"] = await decrypt_config_secrets(cfg.get("config", {}), catalog_item)
+
+    # Mask password fields
     if catalog_item:
         for field in catalog_item["fields"]:
             if field["type"] == "password" and field["key"] in cfg.get("config", {}):
@@ -198,6 +222,11 @@ async def save_integration(integration_id: str, config: Dict, enabled: bool, upd
         for key, val in config.items():
             if "****" in str(val):
                 config[key] = existing_config.get(key, val)
+
+    # Encrypt password-typed fields before persisting (no-op for values already
+    # encrypted — e.g. the masked-value restore above just put back a
+    # previously-encrypted value unchanged).
+    config = await encrypt_config_secrets(config, catalog_item)
 
     doc = {
         "integration_id": integration_id,

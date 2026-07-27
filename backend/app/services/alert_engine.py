@@ -41,6 +41,23 @@ async def _auto_investigate(alert: Dict):
         pass
 
 
+async def _broadcast_alert_event(event_type: str, alert: Dict):
+    """Best-effort live push to the Problems console (see problems_broadcaster.py) —
+    never allowed to affect alert lifecycle operations themselves."""
+    try:
+        from .problems_broadcaster import broadcast_problem_event
+        await broadcast_problem_event(
+            event_type=event_type,
+            problem_id=f"ae:{alert['id']}",
+            severity=alert.get("severity"),
+            status=alert.get("status"),
+            title=alert.get("title"),
+            source="alert_engine",
+        )
+    except Exception:
+        pass
+
+
 class AlertStatus(str, Enum):
     TRIGGERED = "triggered"
     ACKNOWLEDGED = "acknowledged"
@@ -136,6 +153,8 @@ class AlertEngine:
             "closed_by": None,
             "resolution_notes": None,
             "incident_id": None,
+            "assigned_to": None,
+            "assignment_group": None,
             "auto_resolve_at": (datetime.now(timezone.utc) + timedelta(minutes=auto_resolve_minutes)).isoformat() if auto_resolve_minutes else None,
             "escalation_level": 0,
             "notification_sent": False
@@ -168,6 +187,8 @@ class AlertEngine:
         if severity in ("critical", "high"):
             asyncio.create_task(_auto_investigate(clean_alert))
 
+        asyncio.create_task(_broadcast_alert_event("problem.created", clean_alert))
+
         return clean_alert
     
     async def acknowledge_alert(
@@ -195,7 +216,9 @@ class AlertEngine:
         
         if result:
             await self._update_stats(result["severity"], "acknowledged")
-            return {k: v for k, v in result.items() if k != "_id"}
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_alert_event("problem.updated", clean))
+            return clean
         return None
     
     async def resolve_alert(
@@ -226,7 +249,9 @@ class AlertEngine:
             await self._update_stats(result["severity"], "resolved")
             # Calculate MTTR
             await self._calculate_mttr(result)
-            return {k: v for k, v in result.items() if k != "_id"}
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_alert_event("problem.updated", clean))
+            return clean
         return None
     
     async def close_alert(
@@ -253,7 +278,9 @@ class AlertEngine:
         
         if result:
             await self._update_stats(result["severity"], "closed")
-            return {k: v for k, v in result.items() if k != "_id"}
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_alert_event("problem.updated", clean))
+            return clean
         return None
     
     async def auto_resolve_stale_alerts(self) -> int:
@@ -293,6 +320,35 @@ class AlertEngine:
             return {k: v for k, v in result.items() if k != "_id"}
         return None
     
+    async def assign_alert(
+        self,
+        alert_id: str,
+        assigned_to: Optional[str],
+        assignment_group: Optional[str],
+        user_email: str,
+    ) -> Optional[Dict]:
+        """Assign an alert to a user and/or team — new in the Problems console;
+        no assignment concept existed on this collection before."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        result = await db.alerts_engine.find_one_and_update(
+            {"id": alert_id},
+            {
+                "$set": {
+                    "assigned_to": assigned_to,
+                    "assignment_group": assignment_group,
+                    "updated_at": now,
+                }
+            },
+            return_document=True
+        )
+
+        if result:
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_alert_event("problem.assigned", clean))
+            return clean
+        return None
+
     async def link_to_incident(
         self,
         alert_id: str,

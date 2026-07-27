@@ -77,6 +77,8 @@ import TenantSchedulesPage from './pages/TenantSchedulesPage';
 import ReportBuilderPage from './pages/ReportBuilderPage';
 import PublicPortalPage from './pages/PublicPortalPage';
 import APMTracesPage from './pages/APMTracesPage';
+import LiveCallFlowPage from './pages/LiveCallFlowPage';
+import ProblemsPage from './pages/ProblemsPage';
 import ServiceDetailPage from './pages/ServiceDetailPage';
 import APMQuickstartPage from './pages/APMQuickstartPage';
 import PricingPage from './pages/PricingPage';
@@ -712,6 +714,22 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <APMTracesPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/live-call-flow"
+                element={
+                    <ProtectedRoute>
+                        <LiveCallFlowPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/problems"
+                element={
+                    <ProtectedRoute>
+                        <ProblemsPage />
                     </ProtectedRoute>
                 }
             />

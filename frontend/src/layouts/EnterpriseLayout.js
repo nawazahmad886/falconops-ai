@@ -103,6 +103,16 @@ const API_URL = process.env.REACT_APP_BACKEND_URL;
 // ======================== MODULE DEFINITIONS ========================
 
 const MODULES = {
+    problems: {
+        id: 'problems',
+        label: 'Problems',
+        icon: AlertTriangle,
+        color: 'text-rose-400',
+        description: 'Unified Problem Console',
+        sidebar: [
+            { path: '/problems', label: 'Problems Console', icon: AlertTriangle },
+        ]
+    },
     command: {
         id: 'command',
         label: 'Command',
@@ -154,6 +164,7 @@ const MODULES = {
             { path: '/apm-quickstart', label: 'APM Quickstart', icon: Zap },
             { path: '/service-map', label: 'Service Map (D3)', icon: Network },
             { path: '/topology', label: 'Topology Map', icon: Network },
+            { path: '/live-call-flow', label: 'Live Call Flow', icon: Zap },
             { path: '/metrics-explorer', label: 'Metrics Explorer', icon: LineChart },
         ]
     },
@@ -301,9 +312,32 @@ export const useGlobalContext = () => useContext(GlobalContext);
 
 const GlobalSearch = ({ open, onOpenChange }) => {
     const [query, setQuery] = useState('');
+    const [problemResults, setProblemResults] = useState([]);
     const navigate = useNavigate();
+    const { api } = useAuth();
+
+    // Live Problems search — debounced, only once the query is long enough to
+    // be worth a round-trip. Substring match server-side, not full-text-at-scale
+    // (no Elasticsearch in this stack) — see problems_service.search_problems.
+    useEffect(() => {
+        if (query.trim().length < 2) {
+            setProblemResults([]);
+            return;
+        }
+        let alive = true;
+        const timer = setTimeout(async () => {
+            try {
+                const res = await api.get(`/problems/search?q=${encodeURIComponent(query.trim())}`);
+                if (alive) setProblemResults(res.data?.problems || []);
+            } catch (_e) {
+                if (alive) setProblemResults([]);
+            }
+        }, 300);
+        return () => { alive = false; clearTimeout(timer); };
+    }, [query, api]);
 
     const searchResults = [
+        { type: 'page', label: 'Problems Console', path: '/problems', icon: AlertTriangle },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
@@ -315,6 +349,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         { type: 'page', label: 'Logs', path: '/logs', icon: ScrollText },
         { type: 'page', label: 'APM', path: '/apm', icon: Cpu },
         { type: 'page', label: 'Topology', path: '/topology', icon: GitBranch },
+        { type: 'page', label: 'Live Call Flow', path: '/live-call-flow', icon: Zap },
         { type: 'page', label: 'Reports', path: '/reports', icon: FileText },
         { type: 'page', label: 'Metrics Explorer', path: '/metrics-explorer', icon: LineChart },
         { type: 'page', label: 'Capacity Prediction', path: '/capacity-prediction', icon: TrendingUp },
@@ -354,6 +389,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         navigate(path);
         onOpenChange(false);
         setQuery('');
+        setProblemResults([]);
     };
 
     return (
@@ -383,6 +419,21 @@ const GlobalSearch = ({ open, onOpenChange }) => {
                                 );
                             })}
                         </CommandGroup>
+                        {problemResults.length > 0 && (
+                            <CommandGroup heading="Problems">
+                                {problemResults.map((p) => (
+                                    <CommandItem
+                                        key={p.id}
+                                        onSelect={() => handleSelect(`/problems?open=${encodeURIComponent(p.id)}`)}
+                                        className="cursor-pointer"
+                                    >
+                                        <AlertTriangle className="w-4 h-4 mr-2 text-rose-400" />
+                                        <span className="truncate">{p.title || p.id}</span>
+                                        <span className="ml-auto text-[10px] text-white/40 uppercase">{p.severity}</span>
+                                    </CommandItem>
+                                ))}
+                            </CommandGroup>
+                        )}
                     </CommandList>
                 </Command>
             </DialogContent>
@@ -607,6 +658,7 @@ export const EnterpriseLayout = ({ children }) => {
     // Determine active module based on path
     const getActiveModule = () => {
         const path = location.pathname;
+        if (path.startsWith('/problems')) return 'problems';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';

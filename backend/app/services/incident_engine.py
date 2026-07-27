@@ -2,11 +2,29 @@
 FalconOps AI - Incident Management Engine
 Correlate alerts into incidents with RCA support
 """
+import asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from ..core.database import db
+
+
+async def _broadcast_incident_event(event_type: str, incident: Dict):
+    """Best-effort live push to the Problems console (see problems_broadcaster.py) —
+    never allowed to affect incident lifecycle operations themselves."""
+    try:
+        from .problems_broadcaster import broadcast_problem_event
+        await broadcast_problem_event(
+            event_type=event_type,
+            problem_id=f"ie:{incident['id']}",
+            severity=incident.get("severity"),
+            status=incident.get("status"),
+            title=incident.get("title"),
+            source="incident_engine",
+        )
+    except Exception:
+        pass
 
 
 class IncidentStatus(str, Enum):
@@ -89,23 +107,27 @@ class IncidentEngine:
             ],
             "assignee": None,
             "team": None,
+            "assigned_to": None,
+            "assignment_group": None,
             "priority_score": self._calculate_priority_score(severity, len(affected_services or [])),
             "sla_breach_at": self._calculate_sla_breach(severity),
             "is_sla_breached": False,
             "communication_channel": None,
             "postmortem_id": None
         }
-        
+
         await db.incidents_engine.insert_one(incident_doc)
-        
+
         # Link alerts to this incident
         if initial_alert_ids:
             await db.alerts_engine.update_many(
                 {"id": {"$in": initial_alert_ids}},
                 {"$set": {"incident_id": incident_id}}
             )
-        
-        return {k: v for k, v in incident_doc.items() if k != "_id"}
+
+        clean = {k: v for k, v in incident_doc.items() if k != "_id"}
+        asyncio.create_task(_broadcast_incident_event("problem.created", clean))
+        return clean
     
     async def create_incident_from_alerts(
         self,
@@ -330,15 +352,55 @@ class IncidentEngine:
                 # and reopens + escalates if the "resolved" status doesn't actually hold.
                 if user != "system:autonomous_validator":
                     try:
-                        import asyncio
                         from . import autonomous_ops_orchestrator as orchestrator
                         asyncio.create_task(orchestrator.validate_resolution(incident_id))
                     except Exception:
                         pass
 
-            return {k: v for k, v in result.items() if k != "_id"}
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_incident_event("problem.updated", clean))
+            return clean
         return None
-    
+
+    async def assign_incident(
+        self,
+        incident_id: str,
+        assigned_to: Optional[str],
+        assignment_group: Optional[str],
+        user: str,
+    ) -> Optional[Dict]:
+        """Assign an incident to a user and/or team — new in the Problems console.
+        Finally exercises the assigned_to/assignment_group intent the long-dead
+        assignee/team fields never got wired up to (those stay untouched, always
+        None, for backward compatibility with anything still reading them)."""
+        now = datetime.now(timezone.utc).isoformat()
+
+        result = await db.incidents_engine.find_one_and_update(
+            {"id": incident_id},
+            {
+                "$set": {
+                    "assigned_to": assigned_to,
+                    "assignment_group": assignment_group,
+                    "updated_at": now,
+                },
+                "$push": {
+                    "timeline": {
+                        "timestamp": now,
+                        "action": "assigned",
+                        "user": user,
+                        "details": f"Assigned to {assigned_to or assignment_group or 'unassigned'}",
+                    }
+                },
+            },
+            return_document=True
+        )
+
+        if result:
+            clean = {k: v for k, v in result.items() if k != "_id"}
+            asyncio.create_task(_broadcast_incident_event("problem.assigned", clean))
+            return clean
+        return None
+
     async def set_root_cause(
         self,
         incident_id: str,

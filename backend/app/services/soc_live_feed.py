@@ -1,53 +1,34 @@
 """
 FalconOps AI - Real-time SOC WebSocket & Live Feed Service
 WebSocket endpoint for pushing threats, events, and alerts in real-time
+
+Backed by the shared BroadcastManager (see broadcast_manager.py) — kept as a
+thin adapter module so existing callers (`soc_manager.broadcast(...)`,
+`soc_manager.client_count`) are unaffected.
 """
-import json
-import asyncio
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List, Set
+from typing import Dict, List, Optional
 from fastapi import WebSocket
 
 from ..core.database import db
+from .broadcast_manager import BroadcastManager
 
 logger = logging.getLogger(__name__)
 
 # ======================== CONNECTION MANAGER ========================
 
-class SOCConnectionManager:
-    """Manages WebSocket connections for SOC live feed"""
-
-    def __init__(self):
-        self.active_connections: Set[WebSocket] = set()
-
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.add(websocket)
-        logger.info(f"SOC client connected. Total: {len(self.active_connections)}")
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.discard(websocket)
-        logger.info(f"SOC client disconnected. Total: {len(self.active_connections)}")
-
-    async def broadcast(self, message: Dict):
-        """Broadcast to all connected clients"""
-        dead = set()
-        data = json.dumps(message, default=str)
-        for conn in self.active_connections:
-            try:
-                await conn.send_text(data)
-            except Exception:
-                dead.add(conn)
-        for d in dead:
-            self.active_connections.discard(d)
-
-    @property
-    def client_count(self):
-        return len(self.active_connections)
+async def _send_initial_snapshot(websocket: WebSocket) -> Optional[Dict]:
+    """on_connect hook — sends the same {"type": "initial", "data": recent}
+    snapshot this channel has always sent right after connecting."""
+    recent = await get_recent_feed(30)
+    return {"type": "initial", "data": recent}
 
 
-soc_manager = SOCConnectionManager()
+soc_manager = BroadcastManager(name="soc-feed", on_connect=_send_initial_snapshot)
+
+# Back-compat alias for the old class name.
+SOCConnectionManager = BroadcastManager
 
 
 # ======================== LIVE FEED HELPERS ========================

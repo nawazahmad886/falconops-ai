@@ -1,50 +1,20 @@
 """
 FalconOps AI - WebSocket Manager
 Real-time alert broadcasting to connected clients
+
+Backed by the shared BroadcastManager (see broadcast_manager.py) — kept as a
+thin adapter module so existing callers (`from ..services.websocket_manager
+import ws_manager`) and the `ConnectionManager` type name are unaffected.
 """
-import logging
-from typing import List
-from fastapi import WebSocket
+from .broadcast_manager import BroadcastManager
 
-logger = logging.getLogger(__name__)
+# `use_send_json=True` preserves this channel's original wire format exactly.
+ws_manager = BroadcastManager(name="alerts", use_send_json=True)
 
-
-class ConnectionManager:
-    """Manages WebSocket connections for real-time alert broadcasting"""
-    
-    def __init__(self):
-        self.active_connections: List[WebSocket] = []
-
-    async def connect(self, websocket: WebSocket):
-        """Accept a new WebSocket connection"""
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        logger.info(f"WebSocket connected. Total connections: {len(self.active_connections)}")
-
-    def disconnect(self, websocket: WebSocket):
-        """Remove a disconnected WebSocket"""
-        if websocket in self.active_connections:
-            self.active_connections.remove(websocket)
-        logger.info(f"WebSocket disconnected. Total connections: {len(self.active_connections)}")
-
-    async def broadcast(self, message: dict):
-        """Broadcast message to all connected clients"""
-        disconnected = []
-        for connection in self.active_connections:
-            try:
-                await connection.send_json(message)
-            except Exception as e:
-                logger.error(f"Error sending to websocket: {e}")
-                disconnected.append(connection)
-        # Clean up disconnected clients
-        for conn in disconnected:
-            self.disconnect(conn)
+# Back-compat alias for the old class name.
+ConnectionManager = BroadcastManager
 
 
-# Singleton instance
-ws_manager = ConnectionManager()
-
-
-def get_ws_manager() -> ConnectionManager:
+def get_ws_manager() -> BroadcastManager:
     """Get the WebSocket manager instance"""
     return ws_manager
