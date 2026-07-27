@@ -113,6 +113,16 @@ const MODULES = {
             { path: '/problems', label: 'Problems Console', icon: AlertTriangle },
         ]
     },
+    resources: {
+        id: 'resources',
+        label: 'Resources',
+        icon: Box,
+        color: 'text-cyan-400',
+        description: 'Enterprise Resource Explorer',
+        sidebar: [
+            { path: '/resources', label: 'Resource Explorer', icon: Box },
+        ]
+    },
     command: {
         id: 'command',
         label: 'Command',
@@ -338,6 +348,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
 
     const searchResults = [
         { type: 'page', label: 'Problems Console', path: '/problems', icon: AlertTriangle },
+        { type: 'page', label: 'Resource Explorer', path: '/resources', icon: Box },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
@@ -659,6 +670,7 @@ export const EnterpriseLayout = ({ children }) => {
     const getActiveModule = () => {
         const path = location.pathname;
         if (path.startsWith('/problems')) return 'problems';
+        if (path.startsWith('/resources')) return 'resources';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';

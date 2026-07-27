@@ -79,6 +79,8 @@ import PublicPortalPage from './pages/PublicPortalPage';
 import APMTracesPage from './pages/APMTracesPage';
 import LiveCallFlowPage from './pages/LiveCallFlowPage';
 import ProblemsPage from './pages/ProblemsPage';
+import ResourceExplorerPage from './pages/ResourceExplorerPage';
+import ResourceDetailPage from './pages/ResourceDetailPage';
 import ServiceDetailPage from './pages/ServiceDetailPage';
 import APMQuickstartPage from './pages/APMQuickstartPage';
 import PricingPage from './pages/PricingPage';
@@ -730,6 +732,22 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <ProblemsPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/resources"
+                element={
+                    <ProtectedRoute>
+                        <ResourceExplorerPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/resources/:resourceId"
+                element={
+                    <ProtectedRoute>
+                        <ResourceDetailPage />
                     </ProtectedRoute>
                 }
             />

@@ -59,6 +59,10 @@ from app.connectors.ai_tool_bridge import register_ai_context_tools
 from app.connectors.crypto import migrate_legacy_integrations
 from app.connectors.scheduler import connector_poll_scheduler
 
+# Import the Resource Explorer's bridge/sync scheduler (extends db.topology_nodes
+# from db.servers/db.oneagent_agents/db.db_instances — see resource_explorer_service.py)
+from app.services.resource_explorer_service import resource_bridge_scheduler
+
 # Background task for metrics processor
 metrics_processor_task = None
 
@@ -80,6 +84,9 @@ runbook_schedule_task = None
 # Background task for the Connector SDK's polling scheduler
 connector_poll_task = None
 
+# Background task for the Resource Explorer's bridge/sync scheduler
+resource_bridge_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -88,6 +95,7 @@ async def lifespan(app: FastAPI):
     global threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task
     global runbook_schedule_task
     global connector_poll_task
+    global resource_bridge_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -180,6 +188,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Connector SDK init warning: {e}")
 
+    # Resource Explorer: bridges db.servers + db.oneagent_agents (merged into single
+    # host resources) and db.db_instances into db.topology_nodes on a timer.
+    try:
+        resource_bridge_task = asyncio.create_task(resource_bridge_scheduler())
+        logger.info("Resource Explorer bridge/sync scheduler started")
+    except Exception as e:
+        logger.warning(f"Resource Explorer scheduler init warning: {e}")
+
     # Workflow builder: schedule-trigger executor. Fixes a real pre-existing gap —
     # runbook.schedule.next_run was computed and stored by the manual
     # POST /runbooks/scheduled/execute endpoint, but nothing called it on a timer.
@@ -235,8 +251,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
-    # Stop AI-SOC schedulers + the Connector SDK poll scheduler
-    for task in (threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task, connector_poll_task):
+    # Stop AI-SOC schedulers + the Connector SDK poll scheduler + the Resource Explorer bridge
+    for task in (threat_intel_task, vuln_sync_task, compliance_snapshot_task, generic_ingestion_task, connector_poll_task, resource_bridge_task):
         if task:
             task.cancel()
             try:

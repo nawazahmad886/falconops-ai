@@ -54,19 +54,28 @@ class RunbookEngine:
         trigger_source: str = "manual",
         trigger_context: Dict[str, Any] = None,
         user_email: str = "system",
-        tenant_id: Optional[str] = None
+        tenant_id: Optional[str] = None,
+        entity_id: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        entity_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute a complete runbook with all steps
         Returns execution result with detailed step-by-step outcomes
+
+        entity_id/entity_type/entity_name are optional additions for the
+        Resource Explorer's "Execute Runbook against Resource X" action —
+        backward compatible: existing callers passing none of these are
+        completely unaffected (_interpolate_variables() already falls back to
+        the literal {{placeholder}} text for any unresolved template variable).
         """
         runbook = await db.runbooks.find_one({"id": runbook_id}, {"_id": 0})
         if not runbook:
             return {"success": False, "error": "Runbook not found"}
-        
+
         execution_id = str(uuid.uuid4())
         started_at = datetime.now(timezone.utc).isoformat()
-        
+
         # Initialize execution record
         execution_doc = {
             "id": execution_id,
@@ -76,6 +85,9 @@ class RunbookEngine:
             "trigger_context": trigger_context or {},
             "executed_by": user_email,
             "tenant_id": tenant_id,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "entity_name": entity_name,
             "status": "running",
             "started_at": started_at,
             "completed_at": None,
@@ -86,9 +98,9 @@ class RunbookEngine:
             "variables": {},
             "error_message": None
         }
-        
+
         await db.runbook_executions.insert_one(execution_doc)
-        
+
         # Execute each step
         self.execution_context = {
             "execution_id": execution_id,
@@ -96,6 +108,11 @@ class RunbookEngine:
             "variables": trigger_context or {},
             "step_outputs": {}
         }
+        # setdefault, not overwrite — a runbook template's own trigger_context
+        # value for these keys (if any) takes precedence over the resource link.
+        for _k, _v in (("entity_id", entity_id), ("entity_type", entity_type), ("entity_name", entity_name)):
+            if _v is not None:
+                self.execution_context["variables"].setdefault(_k, _v)
         
         all_success = True
         steps_completed = 0

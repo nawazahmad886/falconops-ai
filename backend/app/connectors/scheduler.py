@@ -16,7 +16,7 @@ from ..core.database import db
 from ..services import soc_ingestion_service
 from ..services.metrics_timeseries_service import metrics_timeseries_service
 from ..services.topology_service import topology_service
-from .base import EventsCapable, MetricsCapable, TopologyCapable
+from .base import EventsCapable, InventoryCapable, MetricsCapable, TopologyCapable
 from .registry import CONNECTOR_REGISTRY
 from .service import build_connector
 
@@ -100,6 +100,24 @@ async def poll_connector_once(integration_id: str) -> Dict[str, Any]:
                 created_edges += 1
         counts["topology_nodes"] = created_nodes
         counts["topology_edges"] = created_edges
+
+    if isinstance(connector, InventoryCapable):
+        # Forward-looking dispatch for the Resource Explorer — no connector
+        # implements InventoryCapable yet, this just wires the mixin so a
+        # future one (e.g. a real AWS EC2/RDS inventory connector) auto-
+        # populates db.topology_nodes via the same source_ref-keyed upsert
+        # the Explorer's own bridge uses.
+        from ..services import resource_explorer_service
+        items = await connector.list_inventory()
+        inventory_created = 0
+        for item in items:
+            result = await resource_explorer_service.upsert_from_connector_inventory(
+                item, integration_id, connector.tenant_id
+            )
+            if result.get("created"):
+                inventory_created += 1
+        counts["inventory"] = len(items)
+        counts["inventory_created"] = inventory_created
 
     await db.integrations.update_one(
         {"integration_id": integration_id},

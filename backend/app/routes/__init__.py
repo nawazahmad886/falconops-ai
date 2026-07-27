@@ -44,6 +44,7 @@ from .soc_live_feed_routes import router as soc_live_feed_router
 from .aws_connector_routes import router as aws_connector_router
 from .connector_routes import router as connector_sdk_router
 from .problems_routes import router as problems_router
+from .resource_explorer_routes import router as resource_explorer_router
 from .kafka_pipeline_routes import router as kafka_pipeline_router
 from .query_analyzer_routes import router as query_analyzer_router
 from .uptime_monitor_routes import router as uptime_monitor_router
@@ -128,6 +129,7 @@ all_routers = [
     aws_connector_router,
     connector_sdk_router,
     problems_router,
+    resource_explorer_router,
     kafka_pipeline_router,
     query_analyzer_router,
     uptime_monitor_router,
