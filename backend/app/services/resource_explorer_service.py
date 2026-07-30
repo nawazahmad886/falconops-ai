@@ -379,6 +379,7 @@ async def list_resources(
     technology: Optional[str] = None,
     environment: Optional[str] = None,
     owner: Optional[str] = None,
+    business_service: Optional[str] = None,
     tags: Optional[List[str]] = None,
     lifecycle_status: Optional[str] = None,
     search: Optional[str] = None,
@@ -403,6 +404,8 @@ async def list_resources(
         query["environment"] = environment
     if owner:
         query["owner"] = {"$regex": re.escape(owner), "$options": "i"}
+    if business_service:
+        query["business_service"] = business_service
     if tags:
         query["tags"] = {"$all": tags}
     if lifecycle_status:
@@ -564,6 +567,66 @@ async def retire_resource(resource_id: str, reason: Optional[str], user_email: s
     )
     if updated:
         await _broadcast(updated, "resource.lifecycle_changed")
+    return updated
+
+
+GOVERNANCE_CRITICALITY_LEVELS = ("mission_critical", "high", "medium", "low")
+
+
+async def set_governance_fields(
+    resource_id: str,
+    *,
+    owner: Optional[str] = None,
+    business_criticality: Optional[str] = None,
+    incident_response_target_minutes: Optional[int] = None,
+    business_service: Optional[str] = None,
+    user_email: str,
+) -> Optional[Dict[str, Any]]:
+    """Set the Knowledge Graph governance fields on a resource: who owns it, how
+    business-critical it is, its incident-response target, and which business
+    service it rolls up to. This is the first user-facing mutation of these
+    fields anywhere in the app — `owner` previously existed on the schema but
+    was only ever set by the resource bridge (always None) or connector
+    auto-discovery; the other three fields are new.
+
+    `business_criticality` is deliberately a different name/concept from
+    vulnerability_service's dynamic `asset_criticality_bonus` (computed from
+    topology fan-out for CVE scoring). `incident_response_target_minutes` is
+    deliberately distinct from sla_service's uptime-percentage `sla_target`
+    and incidents_engine's severity-derived `sla_breach_at` — three different
+    "SLA" concepts that happen to share a name; this one is an admin-set,
+    entity-level MTTR/MTTA target.
+
+    NOTE: for db-instance-derived resources, resource_explorer_service._sync_databases()
+    hardcodes tenant_id=None (a pre-existing read-only ambiguity — those resources are
+    visible to every tenant). This mutation makes that a write ambiguity too: any
+    tenant's admin can set governance fields on a shared, globally-visible db resource.
+    Not fixed here — pre-existing gap in the bridge, out of scope for this feature."""
+    if business_criticality is not None and business_criticality not in GOVERNANCE_CRITICALITY_LEVELS:
+        raise ValueError(f"Invalid business_criticality '{business_criticality}'. Valid: {GOVERNANCE_CRITICALITY_LEVELS}")
+
+    resource = await topology_service.get_service_node(resource_id)
+    if not resource:
+        return None
+
+    updates: Dict[str, Any] = {}
+    if owner is not None:
+        updates["owner"] = owner
+    if business_criticality is not None:
+        updates["business_criticality"] = business_criticality
+    if incident_response_target_minutes is not None:
+        updates["incident_response_target_minutes"] = incident_response_target_minutes
+    if business_service is not None:
+        updates["business_service"] = business_service
+    if not updates:
+        resource.pop("_id", None)
+        return resource
+
+    updates["governance_updated_at"] = datetime.now(timezone.utc).isoformat()
+    updates["governance_updated_by"] = user_email
+    updated = await topology_service.update_service_node(resource_id, updates)
+    if updated:
+        await _broadcast(updated, "resource.governance_updated")
     return updated
 
 

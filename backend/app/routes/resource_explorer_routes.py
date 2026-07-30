@@ -29,6 +29,13 @@ class RetireRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class GovernanceRequest(BaseModel):
+    owner: Optional[str] = None
+    business_criticality: Optional[str] = None
+    incident_response_target_minutes: Optional[int] = None
+    business_service: Optional[str] = None
+
+
 class RunbookExecRequest(BaseModel):
     runbook_id: str
 
@@ -43,6 +50,7 @@ async def list_resources_route(
     technology: Optional[str] = None,
     environment: Optional[str] = None,
     owner: Optional[str] = None,
+    business_service: Optional[str] = None,
     tags: Optional[List[str]] = Query(None),
     lifecycle_status: Optional[str] = None,
     search: Optional[str] = None,
@@ -56,6 +64,7 @@ async def list_resources_route(
     tenant_id = current_user.get("tenant_id")
     return await res_svc.list_resources(
         category=category, technology=technology, environment=environment, owner=owner,
+        business_service=business_service,
         tags=tags, lifecycle_status=lifecycle_status, search=search, sort_by=sort_by,
         sort_order=sort_order, include_retired=include_retired, limit=limit, offset=offset,
         tenant_id=tenant_id,
@@ -257,6 +266,30 @@ async def retire_route(resource_id: str, req: RetireRequest, current_user: dict 
 @router.post("/{resource_id}/restore")
 async def restore_route(resource_id: str, current_user: dict = Depends(require_write_access)):
     result = await res_svc.restore_resource(resource_id, current_user.get("email"))
+    if not result:
+        raise HTTPException(404, "Resource not found")
+    return result
+
+
+@router.put("/{resource_id}/governance")
+async def set_governance_route(resource_id: str, req: GovernanceRequest, current_user: dict = Depends(require_write_access)):
+    """Set Knowledge Graph governance fields (owner/business_criticality/
+    incident_response_target_minutes/business_service). Uses _load_resource_or_404
+    for a tenant check the sibling monitoring/retire/restore mutations below don't
+    perform (a pre-existing gap on those four, not touched here) — this being a new
+    endpoint, there's no reason to introduce the same gap."""
+    await _load_resource_or_404(resource_id, current_user)
+    try:
+        result = await res_svc.set_governance_fields(
+            resource_id,
+            owner=req.owner,
+            business_criticality=req.business_criticality,
+            incident_response_target_minutes=req.incident_response_target_minutes,
+            business_service=req.business_service,
+            user_email=current_user.get("email", "system"),
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     if not result:
         raise HTTPException(404, "Resource not found")
     return result

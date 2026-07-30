@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
-import { Box, RefreshCw, Wifi, WifiOff } from 'lucide-react';
+import { Box, RefreshCw, Wifi, WifiOff, Layers, X } from 'lucide-react';
 import ResourcesFilterPanel from '../components/resources/ResourcesFilterPanel';
 import ResourcesGrid from '../components/resources/ResourcesGrid';
 
@@ -24,11 +24,60 @@ function buildQuery(filters) {
     if (filters.environment) params.set('environment', filters.environment);
     if (filters.lifecycle_status) params.set('lifecycle_status', filters.lifecycle_status);
     if (filters.owner) params.set('owner', filters.owner);
+    if (filters.business_service) params.set('business_service', filters.business_service);
     if (filters.search) params.set('search', filters.search);
     if (filters.include_retired) params.set('include_retired', 'true');
     (filters.tags || []).forEach((t) => params.append('tags', t));
     params.set('limit', '200');
     return params.toString();
+}
+
+const STATUS_DOT = {
+    healthy: 'bg-emerald-400', degraded: 'bg-amber-400', critical: 'bg-red-400', unknown: 'bg-white/30',
+};
+
+// Rollup of resources by the business_service governance field (set via
+// ResourceDetailPage.js's Overview tab). Only nodes with that field set appear.
+function BusinessServicesStrip({ activeService, onSelect }) {
+    const [rows, setRows] = useState(null);
+
+    useEffect(() => {
+        let alive = true;
+        fetch(`${API}/api/knowledge-graph/business-services`, { headers: authHeaders() })
+            .then((r) => r.json())
+            .then((d) => { if (alive) setRows(d.business_services || []); })
+            .catch(() => alive && setRows([]));
+        return () => { alive = false; };
+    }, []);
+
+    if (!rows || rows.length === 0) return null;
+
+    return (
+        <div className="flex items-center gap-2 flex-wrap" data-testid="business-services-strip">
+            <span className="text-xs text-white/40 flex items-center gap-1.5"><Layers className="w-3.5 h-3.5" /> Business services:</span>
+            {rows.map((r) => (
+                <button
+                    key={r.business_service}
+                    onClick={() => onSelect(activeService === r.business_service ? null : r.business_service)}
+                    data-testid={`business-service-${r.business_service}`}
+                    className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                        activeService === r.business_service
+                            ? 'bg-cyan-500/15 border-cyan-500/40 text-cyan-300'
+                            : 'bg-white/[0.03] border-white/10 text-white/60 hover:bg-white/[0.06]'
+                    }`}
+                >
+                    <span className={`w-1.5 h-1.5 rounded-full ${STATUS_DOT[r.worst_status] || STATUS_DOT.unknown}`} />
+                    {r.business_service}
+                    <span className="text-white/30">({r.node_count})</span>
+                </button>
+            ))}
+            {activeService && (
+                <button onClick={() => onSelect(null)} className="text-white/30 hover:text-white/60" data-testid="clear-business-service">
+                    <X className="w-3.5 h-3.5" />
+                </button>
+            )}
+        </div>
+    );
 }
 
 export default function ResourceExplorerPage() {
@@ -183,6 +232,11 @@ export default function ResourceExplorerPage() {
                     </Button>
                 </div>
             </div>
+
+            <BusinessServicesStrip
+                activeService={filters.business_service}
+                onSelect={(svc) => setFilters((f) => ({ ...f, business_service: svc || undefined }))}
+            />
 
             <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                 <div className="lg:col-span-1 bg-black/40 border border-white/10 rounded-lg">

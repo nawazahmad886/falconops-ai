@@ -7,10 +7,15 @@ import { Tabs, TabsList, TabsTrigger, TabsContent } from '../components/ui/tabs'
 import {
     Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '../components/ui/select';
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../components/ui/dialog';
+import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import { toast } from 'sonner';
+import { useAuth } from '../context/AuthContext';
 import {
     ArrowLeft, RefreshCw, Box, HeartPulse, LineChart, Bell, Network, Settings,
     Sparkles, Wrench, ChevronRight, ArrowRight, ArrowDownRight, ArrowUpRight,
+    BookOpen, Pencil,
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
@@ -26,6 +31,15 @@ const SEVERITY_BADGE = {
     low: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
     info: 'bg-white/10 text-white/50 border-white/20',
 };
+
+const CRITICALITY_BADGE = {
+    mission_critical: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
+    high: 'bg-orange-500/15 text-orange-300 border-orange-500/30',
+    medium: 'bg-amber-500/15 text-amber-300 border-amber-500/30',
+    low: 'bg-blue-500/15 text-blue-300 border-blue-500/30',
+};
+
+const CRITICALITY_OPTIONS = ['mission_critical', 'high', 'medium', 'low'];
 
 const HEALTH_COLOR = (score) => {
     if (score == null) return 'text-white/40';
@@ -43,42 +57,152 @@ const NotAvailable = ({ reason }) => (
 );
 
 // ───────── Overview Tab ─────────
-const OverviewTab = ({ resource }) => (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Card className="bg-black/40 border-white/10">
-            <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm">Identity</CardTitle></CardHeader>
-            <CardContent className="p-4 space-y-2 text-xs">
-                <Row label="Name" value={resource.name} />
-                <Row label="Category" value={resource.resource_category} capitalize />
-                <Row label="Technology" value={resource.technology} />
-                <Row label="Environment" value={resource.environment} capitalize />
-                <Row label="Owner" value={resource.owner || 'Unassigned'} />
-                <Row label="Lifecycle status" value={resource.lifecycle_status} capitalize />
-                <Row label="Discovered by" value={resource.discovered_by} />
-                <Row label="Last seen" value={resource.last_seen ? new Date(resource.last_seen).toLocaleString() : '—'} />
-            </CardContent>
-        </Card>
-        <Card className="bg-black/40 border-white/10">
-            <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm">Tags &amp; source references</CardTitle></CardHeader>
-            <CardContent className="p-4 space-y-3 text-xs">
-                <div className="flex flex-wrap gap-1.5">
-                    {(resource.tags || []).length === 0 && <span className="text-white/30">No tags</span>}
-                    {(resource.tags || []).map((t) => (
-                        <span key={t} className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.05] text-white/50 border border-white/10">{t}</span>
-                    ))}
-                </div>
-                <div className="space-y-1">
-                    {(resource.source_refs || []).map((sr, i) => (
-                        <div key={i} className="flex items-center gap-2 text-white/50">
-                            <Badge className="text-[9px] bg-white/5 border-white/10">{sr.collection}</Badge>
-                            <span className="font-mono truncate">{sr.id}</span>
+const OverviewTab = ({ resource, resourceId, onUpdated }) => {
+    const { canWrite } = useAuth();
+    const [showEdit, setShowEdit] = useState(false);
+    const [form, setForm] = useState({
+        owner: resource.owner || '',
+        business_criticality: resource.business_criticality || '',
+        incident_response_target_minutes: resource.incident_response_target_minutes ?? '',
+        business_service: resource.business_service || '',
+    });
+    const [saving, setSaving] = useState(false);
+
+    const openEdit = () => {
+        setForm({
+            owner: resource.owner || '',
+            business_criticality: resource.business_criticality || '',
+            incident_response_target_minutes: resource.incident_response_target_minutes ?? '',
+            business_service: resource.business_service || '',
+        });
+        setShowEdit(true);
+    };
+
+    const handleSave = async () => {
+        setSaving(true);
+        try {
+            const body = {
+                owner: form.owner || null,
+                business_criticality: form.business_criticality || null,
+                incident_response_target_minutes: form.incident_response_target_minutes === '' ? null : Number(form.incident_response_target_minutes),
+                business_service: form.business_service || null,
+            };
+            const r = await fetch(`${API}/api/resources/${encodeURIComponent(resourceId)}/governance`, {
+                method: 'PUT', headers: authHeaders(), body: JSON.stringify(body),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            toast.success('Governance fields updated');
+            setShowEdit(false);
+            onUpdated?.();
+        } catch (e) {
+            toast.error(`Update failed: ${e.message?.slice(0, 200)}`);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Card className="bg-black/40 border-white/10">
+                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm">Identity</CardTitle></CardHeader>
+                <CardContent className="p-4 space-y-2 text-xs">
+                    <Row label="Name" value={resource.name} />
+                    <Row label="Category" value={resource.resource_category} capitalize />
+                    <Row label="Technology" value={resource.technology} />
+                    <Row label="Environment" value={resource.environment} capitalize />
+                    <Row label="Lifecycle status" value={resource.lifecycle_status} capitalize />
+                    <Row label="Discovered by" value={resource.discovered_by} />
+                    <Row label="Last seen" value={resource.last_seen ? new Date(resource.last_seen).toLocaleString() : '—'} />
+                </CardContent>
+            </Card>
+
+            <Card className="bg-black/40 border-white/10" data-testid="governance-card">
+                <CardHeader className="pb-3 border-b border-white/5 flex flex-row items-center justify-between">
+                    <CardTitle className="text-sm">Governance</CardTitle>
+                    {canWrite && (
+                        <Button variant="outline" size="sm" className="h-6 px-2 text-[11px]" onClick={openEdit} data-testid="edit-governance-btn">
+                            <Pencil className="w-3 h-3 mr-1" /> Edit
+                        </Button>
+                    )}
+                </CardHeader>
+                <CardContent className="p-4 space-y-2 text-xs">
+                    <Row label="Owner" value={resource.owner || 'Unassigned'} />
+                    <div className="flex items-center justify-between">
+                        <span className="text-white/40">Business criticality</span>
+                        {resource.business_criticality ? (
+                            <Badge className={`text-[10px] capitalize ${CRITICALITY_BADGE[resource.business_criticality] || SEVERITY_BADGE.info}`}>
+                                {resource.business_criticality.replace('_', ' ')}
+                            </Badge>
+                        ) : <span className="text-white/80">—</span>}
+                    </div>
+                    <Row label="Incident response target" value={resource.incident_response_target_minutes != null ? `${resource.incident_response_target_minutes} min` : '—'} />
+                    <Row label="Business service" value={resource.business_service || '—'} />
+                </CardContent>
+            </Card>
+
+            <Card className="bg-black/40 border-white/10 md:col-span-2">
+                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm">Tags &amp; source references</CardTitle></CardHeader>
+                <CardContent className="p-4 space-y-3 text-xs">
+                    <div className="flex flex-wrap gap-1.5">
+                        {(resource.tags || []).length === 0 && <span className="text-white/30">No tags</span>}
+                        {(resource.tags || []).map((t) => (
+                            <span key={t} className="text-[10px] px-2 py-0.5 rounded-full bg-white/[0.05] text-white/50 border border-white/10">{t}</span>
+                        ))}
+                    </div>
+                    <div className="space-y-1">
+                        {(resource.source_refs || []).map((sr, i) => (
+                            <div key={i} className="flex items-center gap-2 text-white/50">
+                                <Badge className="text-[9px] bg-white/5 border-white/10">{sr.collection}</Badge>
+                                <span className="font-mono truncate">{sr.id}</span>
+                            </div>
+                        ))}
+                    </div>
+                </CardContent>
+            </Card>
+
+            <Dialog open={showEdit} onOpenChange={setShowEdit}>
+                <DialogContent className="bg-[#0d1117] border-white/10 max-w-md" data-testid="governance-edit-dialog">
+                    <DialogHeader>
+                        <DialogTitle className="text-white">Edit governance fields</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3 py-2">
+                        <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Owner</Label>
+                            <Input value={form.owner} onChange={(e) => setForm((f) => ({ ...f, owner: e.target.value }))}
+                                placeholder="e.g. platform-team@company.com" className="bg-white/5 border-white/10 text-sm" data-testid="input-owner" />
                         </div>
-                    ))}
-                </div>
-            </CardContent>
-        </Card>
-    </div>
-);
+                        <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Business criticality</Label>
+                            <Select value={form.business_criticality} onValueChange={(v) => setForm((f) => ({ ...f, business_criticality: v }))}>
+                                <SelectTrigger className="bg-white/5 border-white/10 text-sm" data-testid="select-criticality"><SelectValue placeholder="Not set" /></SelectTrigger>
+                                <SelectContent>
+                                    {CRITICALITY_OPTIONS.map((c) => <SelectItem key={c} value={c}>{c.replace('_', ' ')}</SelectItem>)}
+                                </SelectContent>
+                            </Select>
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Incident response target (minutes)</Label>
+                            <Input type="number" min="0" value={form.incident_response_target_minutes}
+                                onChange={(e) => setForm((f) => ({ ...f, incident_response_target_minutes: e.target.value }))}
+                                placeholder="e.g. 30" className="bg-white/5 border-white/10 text-sm" data-testid="input-response-target" />
+                        </div>
+                        <div className="space-y-1.5">
+                            <Label className="text-xs text-white/50">Business service</Label>
+                            <Input value={form.business_service} onChange={(e) => setForm((f) => ({ ...f, business_service: e.target.value }))}
+                                placeholder="e.g. Checkout" className="bg-white/5 border-white/10 text-sm" data-testid="input-business-service" />
+                        </div>
+                    </div>
+                    <DialogFooter>
+                        <Button variant="outline" size="sm" onClick={() => setShowEdit(false)}>Cancel</Button>
+                        <Button size="sm" onClick={handleSave} disabled={saving} data-testid="save-governance-btn">
+                            {saving ? 'Saving...' : 'Save'}
+                        </Button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+        </div>
+    );
+};
 
 const Row = ({ label, value, capitalize }) => (
     <div className="flex items-center justify-between">
@@ -289,8 +413,77 @@ const AIInsightsTab = ({ resource }) => {
     );
 };
 
+// ───────── Knowledge Tab ─────────
+// Everything already shown in AI Insights (risk/blast-radius) and Alerts (related
+// problems) is deliberately NOT repeated here — this tab only renders the two
+// pieces nothing else surfaces at the entity level: runbooks and similar past
+// incidents (plus the read-only legacy service_topology value, if any).
+const KnowledgeTab = ({ resourceId }) => {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        let alive = true;
+        fetch(`${API}/api/knowledge-graph/entity/${encodeURIComponent(resourceId)}`, { headers: authHeaders() })
+            .then((r) => r.json())
+            .then((d) => { if (alive) { setData(d); setLoading(false); } })
+            .catch(() => alive && setLoading(false));
+        return () => { alive = false; };
+    }, [resourceId]);
+
+    if (loading) return <Spinner />;
+    if (!data) return null;
+
+    const { runbooks = [], similar_past_incidents = [], legacy_service_topology } = data;
+
+    return (
+        <div className="space-y-4">
+            <Card className="bg-black/40 border-white/10" data-testid="runbooks-card">
+                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm flex items-center gap-2"><BookOpen className="w-4 h-4 text-cyan-400" /> Runbooks for this service</CardTitle></CardHeader>
+                <CardContent className="p-0 divide-y divide-white/5">
+                    {runbooks.length === 0 ? (
+                        <p className="text-xs text-white/30 p-4">No runbooks scoped to this service name.</p>
+                    ) : runbooks.map((rb) => (
+                        <div key={rb.id} className="p-3 flex items-center gap-3" data-testid={`runbook-${rb.id}`}>
+                            <span className="text-sm text-white/80 truncate flex-1">{rb.name}</span>
+                            <span className="text-[11px] text-white/40 capitalize">{rb.category}</span>
+                        </div>
+                    ))}
+                </CardContent>
+            </Card>
+
+            <Card className="bg-black/40 border-white/10" data-testid="similar-incidents-card">
+                <CardHeader className="pb-3 border-b border-white/5"><CardTitle className="text-sm flex items-center gap-2"><Sparkles className="w-4 h-4 text-violet-400" /> Similar past incidents</CardTitle></CardHeader>
+                <CardContent className="p-0 divide-y divide-white/5">
+                    {similar_past_incidents.length === 0 ? (
+                        <p className="text-xs text-white/30 p-4">No similar past incidents found (semantic match — may recall fewer results than "related alerts" in the Alerts tab).</p>
+                    ) : similar_past_incidents.map((s) => (
+                        <div key={s.id} className="p-3 flex items-center gap-3" data-testid={`similar-incident-${s.id}`}>
+                            <Badge className="text-[10px] bg-white/5 border-white/10 shrink-0">{Math.round(s.similarity * 100)}% match</Badge>
+                            <span className="text-xs text-white/70 truncate flex-1">{s.text}</span>
+                        </div>
+                    ))}
+                </CardContent>
+            </Card>
+
+            {legacy_service_topology && (
+                <Card className="bg-black/40 border-amber-500/20" data-testid="legacy-topology-card">
+                    <CardHeader className="pb-3 border-b border-amber-500/10">
+                        <CardTitle className="text-sm text-amber-300/80">Legacy service_topology value (read-only)</CardTitle>
+                    </CardHeader>
+                    <CardContent className="p-4 text-xs text-white/60 space-y-1">
+                        <p className="text-amber-300/60 mb-2">Set via a separate admin tool (Context Engine); may not match the Governance tier above.</p>
+                        <Row label="Tier" value={legacy_service_topology.tier} />
+                        <Row label="Owner" value={legacy_service_topology.owner} />
+                    </CardContent>
+                </Card>
+            )}
+        </div>
+    );
+};
+
 // ───────── Automation / Runbooks Tab ─────────
-const AutomationTab = ({ resourceId }) => {
+const AutomationTab = ({ resourceId, resourceName }) => {
     const [runbooks, setRunbooks] = useState([]);
     const [selected, setSelected] = useState('');
     const [loading, setLoading] = useState(true);
@@ -299,12 +492,14 @@ const AutomationTab = ({ resourceId }) => {
 
     useEffect(() => {
         let alive = true;
-        fetch(`${API}/api/runbooks`, { headers: authHeaders() })
+        // Scoped to this resource's name — previously fetched every runbook in the
+        // tenant regardless of which service they applied to.
+        fetch(`${API}/api/runbooks?service=${encodeURIComponent(resourceName)}`, { headers: authHeaders() })
             .then((r) => r.json())
             .then((d) => { if (alive) { setRunbooks(Array.isArray(d) ? d : []); setLoading(false); } })
             .catch(() => alive && setLoading(false));
         return () => { alive = false; };
-    }, []);
+    }, [resourceName]);
 
     const execute = async () => {
         if (!selected) return;
@@ -426,17 +621,19 @@ export default function ResourceDetailPage() {
                     <TabsTrigger value="dependencies" data-testid="tab-dependencies"><Network className="w-3.5 h-3.5 mr-1.5" />Dependencies</TabsTrigger>
                     <TabsTrigger value="configuration" data-testid="tab-configuration"><Settings className="w-3.5 h-3.5 mr-1.5" />Configuration</TabsTrigger>
                     <TabsTrigger value="ai-insights" data-testid="tab-ai-insights"><Sparkles className="w-3.5 h-3.5 mr-1.5" />AI Insights</TabsTrigger>
+                    <TabsTrigger value="knowledge" data-testid="tab-knowledge"><BookOpen className="w-3.5 h-3.5 mr-1.5" />Knowledge</TabsTrigger>
                     <TabsTrigger value="automation" data-testid="tab-automation"><Wrench className="w-3.5 h-3.5 mr-1.5" />Automation</TabsTrigger>
                 </TabsList>
 
-                <TabsContent value="overview" className="mt-4"><OverviewTab resource={resource} /></TabsContent>
+                <TabsContent value="overview" className="mt-4"><OverviewTab resource={resource} resourceId={resourceId} onUpdated={loadResource} /></TabsContent>
                 <TabsContent value="health" className="mt-4"><HealthTab resource={resource} /></TabsContent>
                 <TabsContent value="metrics" className="mt-4"><MetricsTab resourceId={resourceId} /></TabsContent>
                 <TabsContent value="alerts" className="mt-4"><AlertsTab resourceId={resourceId} /></TabsContent>
                 <TabsContent value="dependencies" className="mt-4"><DependenciesTab resourceId={resourceId} resourceName={resource.name} /></TabsContent>
                 <TabsContent value="configuration" className="mt-4"><ConfigurationTab resourceId={resourceId} /></TabsContent>
                 <TabsContent value="ai-insights" className="mt-4"><AIInsightsTab resource={resource} /></TabsContent>
-                <TabsContent value="automation" className="mt-4"><AutomationTab resourceId={resourceId} /></TabsContent>
+                <TabsContent value="knowledge" className="mt-4"><KnowledgeTab resourceId={resourceId} /></TabsContent>
+                <TabsContent value="automation" className="mt-4"><AutomationTab resourceId={resourceId} resourceName={resource.name} /></TabsContent>
             </Tabs>
         </div>
     );
