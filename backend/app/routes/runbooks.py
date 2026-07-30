@@ -2,18 +2,32 @@
 FalconOps AI - Runbook Routes
 Enterprise Runbook management and execution with automation engine
 """
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Optional, List
 from fastapi import APIRouter, HTTPException, Depends, Query, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from ..core.database import db
 from ..models.schemas import RunbookCreate, RunbookResponse
 from ..utils.auth import require_auth, require_write_access, get_current_user, build_tenant_query
 from ..services.runbook_engine import runbook_engine, get_runbook_templates, get_action_types
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/runbooks", tags=["Runbooks"])
+
+
+def _to_runbook_response(doc: dict) -> Optional[RunbookResponse]:
+    """Best-effort RunbookResponse construction: skip (and log) any doc that doesn't
+    match the structured Runbook schema instead of 500ing the whole list — a defense
+    against future schema drift in db.runbooks now that it's a shared collection."""
+    try:
+        return RunbookResponse(**doc)
+    except ValidationError as e:
+        logger.warning(f"Skipping malformed runbook doc id={doc.get('id')}: {e}")
+        return None
 
 
 # ======================== MODELS ========================
@@ -74,7 +88,7 @@ async def get_runbooks(
         query = build_tenant_query(current_user.get("tenant_id"), query)
     
     runbooks = await db.runbooks.find(query, {"_id": 0}).sort("created_at", -1).to_list(200)
-    return [RunbookResponse(**r) for r in runbooks]
+    return [r for r in (_to_runbook_response(doc) for doc in runbooks) if r is not None]
 
 
 @router.post("", response_model=RunbookResponse)
@@ -279,7 +293,10 @@ async def get_runbook(runbook_id: str, current_user: Optional[dict] = Depends(ge
     runbook = await db.runbooks.find_one({"id": runbook_id}, {"_id": 0})
     if not runbook:
         raise HTTPException(status_code=404, detail="Runbook not found")
-    return RunbookResponse(**runbook)
+    resp = _to_runbook_response(runbook)
+    if resp is None:
+        raise HTTPException(status_code=404, detail="Runbook not found")
+    return resp
 
 
 @router.put("/{runbook_id}", response_model=RunbookResponse)

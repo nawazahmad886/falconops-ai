@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 
 from ..core.database import db
 from ..services import ai_tools_service, intelligence_agents_service, rag_service
-from ..utils.auth import require_auth
+from ..utils.auth import require_auth, require_admin
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/ai-intelligence", tags=["AI Intelligence Layer"])
@@ -44,8 +44,13 @@ async def list_tools(user: dict = Depends(require_auth)) -> Dict[str, Any]:
 
 
 @router.post("/tools/{tool_name}/execute")
-async def execute_tool(tool_name: str, body: ToolExecIn, user: dict = Depends(require_auth)) -> Dict[str, Any]:
-    return await ai_tools_service.execute_tool(tool_name, body.params)
+async def execute_tool(tool_name: str, body: ToolExecIn, user: dict = Depends(require_admin)) -> Dict[str, Any]:
+    """Admin-only: this bypasses the narrow-agent layer and hands any caller raw
+    access to tools like get_ueba_profiles/get_threats/get_vulnerabilities —
+    previously reachable by any authenticated user regardless of role, a real
+    excessive-data-exposure gap the narrow-agent design elsewhere is meant to
+    prevent."""
+    return await ai_tools_service.execute_tool(tool_name, body.params, tenant_id=user.get("tenant_id"))
 
 
 @router.get("/services")
@@ -57,7 +62,8 @@ async def services(user: dict = Depends(require_auth)) -> Dict[str, Any]:
 async def history(user: dict = Depends(require_auth),
                   mode: Optional[str] = Query(None),
                   limit: int = Query(20, ge=1, le=100)) -> Dict[str, Any]:
-    q: Dict[str, Any] = {}
+    tid = user.get("tenant_id")
+    q: Dict[str, Any] = {"tenant_id": tid} if tid else {}
     if mode:
         q["mode"] = mode
     rows = await db.ai_intelligence_analyses.find(q, {"_id": 0, "structured_data": 0}) \
@@ -67,7 +73,11 @@ async def history(user: dict = Depends(require_auth),
 
 @router.get("/analysis/{analysis_id}")
 async def get_analysis(analysis_id: str, user: dict = Depends(require_auth)) -> Dict[str, Any]:
-    doc = await db.ai_intelligence_analyses.find_one({"id": analysis_id}, {"_id": 0})
+    tid = user.get("tenant_id")
+    query: Dict[str, Any] = {"id": analysis_id}
+    if tid:
+        query["tenant_id"] = tid
+    doc = await db.ai_intelligence_analyses.find_one(query, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="analysis not found")
     return doc

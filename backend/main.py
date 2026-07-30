@@ -57,6 +57,8 @@ from app.services import workflow_trigger_service
 from app import connectors as connector_sdk  # noqa: F401
 from app.connectors.ai_tool_bridge import register_ai_context_tools
 from app.connectors.crypto import migrate_legacy_integrations
+from app.routes.topology import migrate_monitor_dependencies
+from app.services.context_engine import migrate_alert_runbook_hints
 from app.connectors.scheduler import connector_poll_scheduler
 
 # Import the Resource Explorer's bridge/sync scheduler (extends db.topology_nodes
@@ -128,13 +130,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Weekly enterprise report scheduler init failed: {e}")
     
-    # Initialize and start metrics stream processor
+    # Initialize and start metrics stream processor. Not logged as unconditionally
+    # "started" — process_stream() itself now logs (and self_monitor.py's
+    # background-jobs check now detects) whether it actually stayed running or
+    # returned immediately because Redis is unreachable.
     try:
         await metrics_timeseries_service.initialize_stream()
         metrics_processor_task = asyncio.create_task(
             metrics_timeseries_service.process_stream()
         )
-        logger.info("Metrics stream processor started")
+        logger.info("Metrics stream processor task created — see GET /api/self-monitor/health for whether it's actually running")
     except Exception as e:
         logger.warning(f"Metrics processor init warning: {e}")
 
@@ -181,6 +186,16 @@ async def lifespan(app: FastAPI):
         logger.info(f"Connector secret migration: {migration_result}")
     except Exception as e:
         logger.warning(f"Connector secret migration skipped: {e}")
+    try:
+        dep_migration_result = await migrate_monitor_dependencies()
+        logger.info(f"Monitor-dependency collection split migration: {dep_migration_result}")
+    except Exception as e:
+        logger.warning(f"Monitor-dependency migration skipped: {e}")
+    try:
+        runbook_migration_result = await migrate_alert_runbook_hints()
+        logger.info(f"Alert-runbook-hints collection split migration: {runbook_migration_result}")
+    except Exception as e:
+        logger.warning(f"Alert-runbook-hints migration skipped: {e}")
     try:
         registered_tools = register_ai_context_tools()
         connector_poll_task = asyncio.create_task(connector_poll_scheduler())
@@ -376,6 +391,36 @@ async def tenant_resolution_middleware(request, call_next):
 # Include all routers
 for router in all_routers:
     app.include_router(router)
+
+
+# ─── WebSocket auth ──────────────────────────────────────────────────────────
+# Security fix: ws_manager (/ws/alerts) and soc_manager (/ws/soc-feed) previously
+# had no `authenticate` hook at all, unlike their sibling broadcast channels
+# (AI Monitoring, Problems, Resource Explorer, OTLP traces live feeds), which all
+# require a `?token=<jwt>` query param. That meant anyone who could reach the
+# backend got the platform's real-time alert stream and SOC security-threat feed
+# with zero credentials. Same lightweight token-gate pattern as those siblings.
+async def _ws_jwt_authenticate(websocket: WebSocket) -> bool:
+    """Same `?token=<jwt>` gate as the AI Monitoring/Problems/Resource Explorer/
+    OTLP-traces live channels — kept consistent rather than inventing a new shape."""
+    token = websocket.query_params.get("token") or ""
+    if not token:
+        await websocket.send_json({"type": "error", "error": "missing token"})
+        await websocket.close()
+        return False
+    try:
+        import jwt as _pyjwt
+        from app.core.config import JWT_SECRET, JWT_ALGORITHM
+        _pyjwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except Exception:
+        await websocket.send_json({"type": "error", "error": "invalid token"})
+        await websocket.close()
+        return False
+    return True
+
+
+ws_manager.authenticate = _ws_jwt_authenticate
+soc_manager.authenticate = _ws_jwt_authenticate
 
 
 # WebSocket endpoint for real-time alerts

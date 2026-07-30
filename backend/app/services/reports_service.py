@@ -20,20 +20,22 @@ report_scheduler_task = None
 report_scheduler_running = False
 
 
-async def generate_uptime_report(period_hours: int = 24, monitor_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+async def generate_uptime_report(period_hours: int = 24, monitor_ids: Optional[List[str]] = None, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Generate uptime report data for the specified period"""
     since = (datetime.now(timezone.utc) - timedelta(hours=period_hours)).isoformat()
-    
+
     query = {"enabled": True}
     if monitor_ids:
         query["id"] = {"$in": monitor_ids}
+    if tenant_id:
+        query["tenant_id"] = tenant_id
     monitors = await db.monitors.find(query, {"_id": 0}).to_list(500)
-    
+
     monitor_stats = []
     total_uptime = 0
     total_checks = 0
     sla_compliant = 0
-    
+
     for monitor in monitors:
         results = await db.monitor_results.find({
             "monitor_id": monitor["id"],
@@ -65,11 +67,13 @@ async def generate_uptime_report(period_hours: int = 24, monitor_ids: Optional[L
             })
     
     incidents = await db.incidents.find({
-        "created_at": {"$gte": since}
+        "created_at": {"$gte": since},
+        **({"tenant_id": tenant_id} if tenant_id else {}),
     }, {"_id": 0}).sort("created_at", -1).to_list(20)
-    
+
     alerts = await db.alerts.find({
-        "created_at": {"$gte": since}
+        "created_at": {"$gte": since},
+        **({"tenant_id": tenant_id} if tenant_id else {}),
     }, {"_id": 0}).to_list(1000)
     
     alert_summary = {
@@ -144,23 +148,32 @@ Provide:
         return f"AI summary generation failed: {str(e)}"
 
 
-async def generate_executive_report_data(start_date: str, end_date: str, include_ai_summary: bool = True) -> Dict[str, Any]:
+async def generate_executive_report_data(start_date: str, end_date: str, include_ai_summary: bool = True, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Generate executive report data"""
     start_dt = datetime.fromisoformat(start_date + "T00:00:00+00:00")
     end_dt = datetime.fromisoformat(end_date + "T23:59:59+00:00")
-    
+    tenant_filter = {"tenant_id": tenant_id} if tenant_id else {}
+
     incidents = await db.incidents.find({
-        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}
+        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+        **tenant_filter,
     }, {"_id": 0}).to_list(10000)
-    
+
     alerts = await db.alerts.find({
-        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}
+        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+        **tenant_filter,
     }, {"_id": 0}).to_list(10000)
-    
-    monitors = await db.monitors.find({"enabled": True}, {"_id": 0}).to_list(500)
-    monitor_results = await db.monitor_results.find({
-        "created_at": {"$gte": start_dt.isoformat()}
-    }, {"_id": 0}).to_list(50000)
+
+    monitors = await db.monitors.find({"enabled": True, **tenant_filter}, {"_id": 0}).to_list(500)
+    # monitor_results docs carry no tenant_id of their own (confirmed — only
+    # monitor_id) — scope via the already-tenant-filtered monitor id set instead.
+    monitor_ids = [m["id"] for m in monitors]
+    monitor_results_query = {"created_at": {"$gte": start_dt.isoformat()}}
+    if tenant_id:
+        monitor_results_query["monitor_id"] = {"$in": monitor_ids}
+    monitor_results = await db.monitor_results.find(
+        monitor_results_query, {"_id": 0}
+    ).to_list(50000)
     
     total_incidents = len(incidents)
     resolved_incidents = sum(1 for i in incidents if i.get("status") == "resolved")
@@ -210,15 +223,20 @@ async def generate_executive_report_data(start_date: str, end_date: str, include
     return report_data
 
 
-async def generate_sla_report_data(start_date: str, end_date: str) -> Dict[str, Any]:
+async def generate_sla_report_data(start_date: str, end_date: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Generate SLA report data"""
     start_dt = datetime.fromisoformat(start_date + "T00:00:00+00:00")
     end_dt = datetime.fromisoformat(end_date + "T23:59:59+00:00")
-    
-    monitors = await db.monitors.find({}, {"_id": 0}).to_list(500)
-    results = await db.monitor_results.find({
-        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}
-    }, {"_id": 0}).to_list(100000)
+
+    monitors = await db.monitors.find({**({"tenant_id": tenant_id} if tenant_id else {})}, {"_id": 0}).to_list(500)
+    # monitor_results carries no tenant_id of its own — without scoping this query
+    # to this tenant's monitor ids too, the overall_availability aggregate below
+    # (which sums across every key in monitor_sla, not just this tenant's monitors)
+    # would silently include other tenants' check results.
+    results_query = {"created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}}
+    if tenant_id:
+        results_query["monitor_id"] = {"$in": [m["id"] for m in monitors]}
+    results = await db.monitor_results.find(results_query, {"_id": 0}).to_list(100000)
     
     monitor_sla = {}
     for result in results:
@@ -263,13 +281,14 @@ async def generate_sla_report_data(start_date: str, end_date: str) -> Dict[str, 
     }
 
 
-async def generate_incident_report_data(start_date: str, end_date: str) -> Dict[str, Any]:
+async def generate_incident_report_data(start_date: str, end_date: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Generate incident analytics report data"""
     start_dt = datetime.fromisoformat(start_date + "T00:00:00+00:00")
     end_dt = datetime.fromisoformat(end_date + "T23:59:59+00:00")
-    
+
     incidents = await db.incidents.find({
-        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()}
+        "created_at": {"$gte": start_dt.isoformat(), "$lte": end_dt.isoformat()},
+        **({"tenant_id": tenant_id} if tenant_id else {}),
     }, {"_id": 0}).to_list(10000)
     
     total = len(incidents)

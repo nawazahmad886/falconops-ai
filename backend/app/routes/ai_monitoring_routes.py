@@ -5,8 +5,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any, Literal
+from typing import Optional, List, Dict, Any, Literal, Tuple
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
@@ -16,6 +17,10 @@ from ..services.ai_monitoring_broadcaster import broadcaster
 from ..utils.auth import require_auth
 
 router = APIRouter(prefix="/api/ai-monitoring", tags=["AI Monitoring"])
+
+
+def _tid(user: dict) -> Optional[str]:
+    return (user or {}).get("tenant_id")
 
 
 class EvaluateRequest(BaseModel):
@@ -50,6 +55,7 @@ async def evaluate(req: EvaluateRequest, user: dict = Depends(require_auth)) -> 
         user_id=user.get("id"),
         source=req.source,
         skip_llm_agents=req.skip_llm_agents,
+        tenant_id=_tid(user),
     )
     return event
 
@@ -64,6 +70,9 @@ async def list_events(
 ) -> Dict[str, Any]:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     q: Dict[str, Any] = {"received_at": {"$gte": cutoff}}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
     if status:
         q["verdict.system_status"] = status
     if source:
@@ -74,7 +83,11 @@ async def list_events(
 
 @router.get("/events/{event_id}")
 async def get_event(event_id: str, user: dict = Depends(require_auth)) -> Dict[str, Any]:
-    doc = await db.ai_monitoring_events.find_one({"id": event_id}, {"_id": 0})
+    q: Dict[str, Any] = {"id": event_id}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    doc = await db.ai_monitoring_events.find_one(q, {"_id": 0})
     if not doc:
         raise HTTPException(404, "Event not found")
     return doc
@@ -85,7 +98,10 @@ async def dashboard(user: dict = Depends(require_auth),
                     hours: int = Query(24, ge=1, le=720)) -> Dict[str, Any]:
     """Aggregated dashboard stats for the AI Monitoring page."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    base = {"received_at": {"$gte": cutoff}}
+    base: Dict[str, Any] = {"received_at": {"$gte": cutoff}}
+    tid = _tid(user)
+    if tid:
+        base["tenant_id"] = tid
     total = await db.ai_monitoring_events.count_documents(base)
     healthy = await db.ai_monitoring_events.count_documents({**base, "verdict.system_status": "healthy"})
     warning = await db.ai_monitoring_events.count_documents({**base, "verdict.system_status": "warning"})
@@ -213,7 +229,10 @@ async def timeseries(
     Powers the Overview tab sparklines."""
     cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
     cutoff = cutoff_dt.isoformat()
-    base = {"received_at": {"$gte": cutoff}}
+    base: Dict[str, Any] = {"received_at": {"$gte": cutoff}}
+    tid = _tid(user)
+    if tid:
+        base["tenant_id"] = tid
 
     # We store received_at as ISO string -> convert to date in pipeline
     pipeline = [
@@ -267,6 +286,178 @@ async def timeseries(
     }
 
 
+def _percentiles(values: List[float]) -> Dict[str, float]:
+    """p50/p90/p95/p99 + avg/max over a raw list of latency_ms samples."""
+    arr = np.array(values, dtype=float)
+    p50, p90, p95, p99 = np.percentile(arr, [50, 90, 95, 99])
+    return {
+        "p50": round(float(p50), 1), "p90": round(float(p90), 1),
+        "p95": round(float(p95), 1), "p99": round(float(p99), 1),
+        "avg": round(float(np.mean(arr)), 1), "max": round(float(np.max(arr)), 1),
+    }
+
+
+@router.get("/latency-stats")
+async def latency_stats(
+    user: dict = Depends(require_auth),
+    hours: int = Query(24, ge=1, le=720),
+    bucket_minutes: int = Query(15, ge=1, le=120),
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Real p50/p90/p95/p99 latency — computed from the same latency_ms already
+    stored on every ai_monitoring_events doc (no new collection, no dual-write).
+    Reuses /timeseries's exact bucketing pattern, swapping the $avg/$max
+    accumulator for $push so percentiles can be computed in Python."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    base: Dict[str, Any] = {"received_at": {"$gte": cutoff}, "latency_ms": {"$gt": 0}}
+    tid = _tid(user)
+    if tid:
+        base["tenant_id"] = tid
+    if model:
+        base["model"] = model
+    if provider:
+        base["provider"] = provider
+
+    pipeline = [
+        {"$match": base},
+        {"$addFields": {
+            "_ts": {"$dateFromString": {"dateString": "$received_at"}},
+        }},
+        {"$addFields": {
+            "_bucket": {
+                "$toDate": {
+                    "$subtract": [
+                        {"$toLong": "$_ts"},
+                        {"$mod": [{"$toLong": "$_ts"}, bucket_minutes * 60 * 1000]},
+                    ]
+                }
+            }
+        }},
+        {"$group": {"_id": "$_bucket", "latencies": {"$push": "$latency_ms"}}},
+        {"$sort": {"_id": 1}},
+    ]
+
+    points: List[Dict[str, Any]] = []
+    all_latencies: List[float] = []
+    async for row in db.ai_monitoring_events.aggregate(pipeline):
+        vals = row.get("latencies") or []
+        if not vals:
+            continue
+        all_latencies.extend(vals)
+        stats = _percentiles(vals)
+        ts = row["_id"]
+        points.append({
+            "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+            "count": len(vals),
+            **stats,
+        })
+
+    overall = _percentiles(all_latencies) if all_latencies else {
+        "p50": None, "p90": None, "p95": None, "p99": None, "avg": None, "max": None,
+    }
+    overall["sample_size"] = len(all_latencies)
+
+    return {
+        "hours": hours,
+        "bucket_minutes": bucket_minutes,
+        "model": model,
+        "provider": provider,
+        "points": points,
+        "overall": overall,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# GPU Monitoring — reads db.metrics_timeseries, populated by OneAgent's "gpu"
+# plugin via the existing schema-less POST /api/ingest/metrics (no ingestion
+# changes needed — see oneagent/pkg/plugins/gpu/gpu.go).
+# ═════════════════════════════════════════════════════════════════════════════
+
+GPU_METRICS: Dict[str, str] = {
+    "utilization_pct": "gpu.utilization.percent",
+    "memory_pct": "gpu.memory.percent",
+    "memory_used_mb": "gpu.memory.used_mb",
+    "memory_total_mb": "gpu.memory.total_mb",
+    "temperature_c": "gpu.temperature.c",
+    "power_watts": "gpu.power.watts",
+    "fan_pct": "gpu.fan.percent",
+}
+_GPU_GROUP_TAGS = ["host", "gpu_index", "gpu_name", "gpu_vendor"]
+
+
+@router.get("/gpu")
+async def gpu_summary(
+    user: dict = Depends(require_auth),
+    hours: int = Query(1, ge=1, le=168),
+) -> Dict[str, Any]:
+    """Per-GPU summary, merged across the 7 gpu.* metric names by (host, gpu_index).
+    Honest empty state (never fabricated) when no OneAgent host has reported any
+    gpu.* metric in the window — most hosts have no GPU at all."""
+    from ..services.metrics_timeseries_service import metrics_timeseries_service
+
+    start_time = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    merged: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    tid = _tid(user)
+
+    for key, metric_name in GPU_METRICS.items():
+        rows = await metrics_timeseries_service.get_top_metrics(
+            metric_name=metric_name, group_by=_GPU_GROUP_TAGS,
+            aggregation="avg", limit=200, start_time=start_time, tenant_id=tid,
+        )
+        for r in rows:
+            gpu_key = (r.get("host") or "unknown", r.get("gpu_index") or "0")
+            entry = merged.setdefault(gpu_key, {
+                "host": r.get("host"), "gpu_index": r.get("gpu_index"),
+                "gpu_name": r.get("gpu_name"), "gpu_vendor": r.get("gpu_vendor"),
+            })
+            entry[key] = r.get("avg")
+            entry["last_seen"] = r.get("last_timestamp")
+
+    gpus = sorted(merged.values(), key=lambda g: (g.get("host") or "", g.get("gpu_index") or ""))
+    return {
+        "hours": hours,
+        "gpu_count": len(gpus),
+        "gpus": gpus,
+        "detected": len(gpus) > 0,
+        "not_available_reason": None if gpus else (
+            "No GPU metrics reported yet — enable the 'gpu' plugin on a OneAgent "
+            "host with nvidia-smi (NVIDIA) or rocm-smi (AMD) installed"
+        ),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/gpu/timeseries")
+async def gpu_timeseries(
+    host: str,
+    gpu_index: str,
+    user: dict = Depends(require_auth),
+    metric: str = Query("utilization_pct"),
+    hours: int = Query(1, ge=1, le=168),
+    bucket: str = Query("5m", pattern="^(1m|5m|15m|1h|6h|1d)$"),
+) -> Dict[str, Any]:
+    """Time series for one metric on one specific GPU (host + gpu_index).
+    `bucket` uses metrics_timeseries_service.TIME_BUCKETS's exact keys, same as
+    every other consumer of query_metrics()."""
+    from ..services.metrics_timeseries_service import metrics_timeseries_service
+
+    if metric not in GPU_METRICS:
+        raise HTTPException(400, f"Unknown metric '{metric}'. Valid: {list(GPU_METRICS.keys())}")
+
+    start_time = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    end_time = datetime.now(timezone.utc).isoformat()
+
+    result = await metrics_timeseries_service.query_metrics(
+        metric_name=GPU_METRICS[metric],
+        start_time=start_time, end_time=end_time,
+        tags={"host": host, "gpu_index": gpu_index},
+        aggregation="avg", bucket=bucket, tenant_id=_tid(user),
+    )
+    return {"host": host, "gpu_index": gpu_index, "metric": metric, **result}
+
+
 _AGENT_FLAG_FIELDS = {
     "hallucination": "hallucination_detected",
     "injection":     "is_attack",
@@ -292,7 +483,10 @@ async def agent_drilldown(
         raise HTTPException(404, f"Unknown agent_id '{agent_id}'")
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    match = {"received_at": {"$gte": cutoff}, "agents.agent": agent_id}
+    match: Dict[str, Any] = {"received_at": {"$gte": cutoff}, "agents.agent": agent_id}
+    tid = _tid(user)
+    if tid:
+        match["tenant_id"] = tid
 
     total = await db.ai_monitoring_events.count_documents(match)
 
@@ -406,6 +600,9 @@ async def list_quarantine(
     limit: int = Query(50, ge=1, le=500),
 ) -> Dict[str, Any]:
     q: Dict[str, Any] = {} if status == "all" else {"status": status}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
     docs = await db.ai_monitoring_quarantine.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(length=limit)
     return {"items": docs, "count": len(docs)}
 
@@ -413,7 +610,11 @@ async def list_quarantine(
 @router.post("/quarantine/{event_id}")
 async def quarantine_event(event_id: str, user: dict = Depends(require_auth)) -> Dict[str, Any]:
     """Manually quarantine a flagged event so it sits in an admin-review queue."""
-    event = await db.ai_monitoring_events.find_one({"id": event_id}, {"_id": 0})
+    event_q: Dict[str, Any] = {"id": event_id}
+    tid = _tid(user)
+    if tid:
+        event_q["tenant_id"] = tid
+    event = await db.ai_monitoring_events.find_one(event_q, {"_id": 0})
     if not event:
         raise HTTPException(404, "Event not found")
     if user.get("role") not in ("admin", "owner", "analyst"):
@@ -425,6 +626,7 @@ async def quarantine_event(event_id: str, user: dict = Depends(require_auth)) ->
     doc = {
         "id": str(uuid.uuid4()),
         "event_id": event_id,
+        "tenant_id": event.get("tenant_id"),
         "status": "pending",
         "verdict": event.get("verdict", {}).get("system_status"),
         "model": event.get("model"),
@@ -444,8 +646,12 @@ async def quarantine_event(event_id: str, user: dict = Depends(require_auth)) ->
 async def release_quarantine(event_id: str, user: dict = Depends(require_auth)) -> Dict[str, Any]:
     if user.get("role") not in ("admin", "owner"):
         raise HTTPException(403, "Admin role required to release")
+    release_q: Dict[str, Any] = {"event_id": event_id}
+    tid = _tid(user)
+    if tid:
+        release_q["tenant_id"] = tid
     result = await db.ai_monitoring_quarantine.update_one(
-        {"event_id": event_id},
+        release_q,
         {"$set": {
             "status": "released",
             "released_at": datetime.now(timezone.utc).isoformat(),
@@ -461,8 +667,12 @@ async def release_quarantine(event_id: str, user: dict = Depends(require_auth)) 
 async def block_quarantine(event_id: str, user: dict = Depends(require_auth)) -> Dict[str, Any]:
     if user.get("role") not in ("admin", "owner"):
         raise HTTPException(403, "Admin role required to block")
+    block_q: Dict[str, Any] = {"event_id": event_id}
+    tid = _tid(user)
+    if tid:
+        block_q["tenant_id"] = tid
     result = await db.ai_monitoring_quarantine.update_one(
-        {"event_id": event_id},
+        block_q,
         {"$set": {
             "status": "blocked",
             "blocked_at": datetime.now(timezone.utc).isoformat(),

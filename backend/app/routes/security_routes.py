@@ -152,7 +152,8 @@ async def list_security_events(
     current_user: Optional[dict] = Depends(get_current_user),
 ):
     """Get security events with filters"""
-    return await get_security_events(hours, category, severity, action, search, limit, offset)
+    return await get_security_events(hours, category, severity, action, search, limit, offset,
+                                     tenant_id=(current_user or {}).get("tenant_id"))
 
 
 # ======================== CORRELATION ========================

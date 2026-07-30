@@ -17,13 +17,13 @@ import {
     Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from '../components/ui/select';
 import {
-    AreaChart, Area, BarChart, Bar, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid,
+    AreaChart, Area, BarChart, Bar, LineChart, Line, ResponsiveContainer, Tooltip, Legend, XAxis, YAxis, CartesianGrid,
 } from 'recharts';
 import { toast } from 'sonner';
 import {
     Radio, Activity, RefreshCw, Plus, Trash2, ShieldAlert, BrainCircuit, DollarSign,
     Gauge, Sparkles, Eye, EyeOff, Lock, AlertCircle, CheckCircle2, AlertTriangle,
-    PlayCircle, FileLock, FlaskConical, GitBranch, Wifi, WifiOff, Cpu, Terminal,
+    PlayCircle, FileLock, FlaskConical, GitBranch, Wifi, WifiOff, Cpu, Terminal, MemoryStick,
 } from 'lucide-react';
 import LogAnalyzerTab from './LogAnalyzerTab';
 
@@ -90,17 +90,20 @@ function VerdictBadge({ status }) {
 function OverviewTab({ refreshKey }) {
     const [dashboard, setDashboard] = useState(null);
     const [series, setSeries] = useState([]);
+    const [latencyStats, setLatencyStats] = useState(null);
     const [hours, setHours] = useState(24);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
+        const bucketMinutes = hours <= 6 ? 5 : hours <= 24 ? 15 : 60;
         Promise.all([
             api(`/api/ai-monitoring/dashboard?hours=${hours}`),
-            api(`/api/ai-monitoring/timeseries?hours=${hours}&bucket_minutes=${hours <= 6 ? 5 : hours <= 24 ? 15 : 60}`),
+            api(`/api/ai-monitoring/timeseries?hours=${hours}&bucket_minutes=${bucketMinutes}`),
+            api(`/api/ai-monitoring/latency-stats?hours=${hours}&bucket_minutes=${bucketMinutes}`),
         ])
-            .then(([d, ts]) => { if (!cancelled) { setDashboard(d); setSeries(ts.points || []); } })
+            .then(([d, ts, lat]) => { if (!cancelled) { setDashboard(d); setSeries(ts.points || []); setLatencyStats(lat); } })
             .catch((e) => toast.error(`Dashboard load failed: ${e.message}`))
             .finally(() => !cancelled && setLoading(false));
         return () => { cancelled = true; };
@@ -108,15 +111,16 @@ function OverviewTab({ refreshKey }) {
 
     const tiles = useMemo(() => {
         if (!dashboard) return [];
+        const overall = latencyStats?.overall;
         return [
             { label: 'Events', value: dashboard.totals.events, sub: `${hours}h window`, color: 'violet' },
             { label: 'Critical', value: dashboard.totals.critical, sub: 'verdict', color: 'red' },
             { label: 'Warning', value: dashboard.totals.warning, sub: 'verdict', color: 'amber' },
             { label: 'Healthy', value: dashboard.totals.healthy, sub: 'verdict', color: 'emerald' },
             { label: 'Tokens', value: dashboard.tokens.total?.toLocaleString?.() || 0, sub: `$${dashboard.tokens.cost_usd?.toFixed(4) || '0.0000'}`, color: 'cyan' },
-            { label: 'P95 / Avg Latency', value: `${dashboard.performance.max_latency_ms?.toFixed(0) || 0}ms`, sub: `avg ${dashboard.performance.avg_latency_ms?.toFixed(0) || 0}ms`, color: 'blue' },
+            { label: 'P95 Latency', value: overall?.p95 != null ? `${overall.p95.toFixed(0)}ms` : 'n/a', sub: overall?.sample_size ? `p50 ${overall.p50?.toFixed(0)}ms · p99 ${overall.p99?.toFixed(0)}ms` : 'no samples yet', color: 'blue' },
         ];
-    }, [dashboard, hours]);
+    }, [dashboard, latencyStats, hours]);
 
     return (
         <div className="space-y-4" data-testid="observability-overview">
@@ -170,6 +174,31 @@ function OverviewTab({ refreshKey }) {
                             <Area type="monotone" dataKey="warning"  stackId="1" stroke="#fbbf24" fill="url(#gW)" />
                             <Area type="monotone" dataKey="critical" stackId="1" stroke="#f87171" fill="url(#gC)" />
                         </AreaChart>
+                    </ResponsiveContainer>
+                </CardContent>
+            </Card>
+
+            {/* LLM latency percentiles — real p50/p90/p95/p99, not the old
+                mislabeled max-as-p95 tile */}
+            <Card className="bg-black/40 border-white/10">
+                <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2 text-white">
+                        <Gauge className="w-4 h-4 text-blue-400" /> LLM Latency Percentiles
+                    </CardTitle>
+                </CardHeader>
+                <CardContent className="h-[240px]">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={latencyStats?.points || []}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#ffffff10" />
+                            <XAxis dataKey="ts" tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={(v) => (v || '').slice(11, 16)} />
+                            <YAxis tick={{ fontSize: 10, fill: '#94a3b8' }} unit="ms" />
+                            <Tooltip contentStyle={{ background: '#0a0a0a', border: '1px solid #ffffff20', fontSize: 11 }} />
+                            <Legend wrapperStyle={{ fontSize: 11 }} />
+                            <Line type="monotone" dataKey="p50" name="p50" stroke="#22d3ee" dot={false} strokeWidth={1.5} />
+                            <Line type="monotone" dataKey="p90" name="p90" stroke="#60a5fa" dot={false} strokeWidth={1.5} />
+                            <Line type="monotone" dataKey="p95" name="p95" stroke="#fbbf24" dot={false} strokeWidth={1.5} />
+                            <Line type="monotone" dataKey="p99" name="p99" stroke="#f87171" dot={false} strokeWidth={1.5} />
+                        </LineChart>
                     </ResponsiveContainer>
                 </CardContent>
             </Card>
@@ -668,6 +697,138 @@ function QuarantineTab({ refreshKey, bumpRefresh }) {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// GPU TAB
+// ──────────────────────────────────────────────────────────────────────────────
+function ProgressBar({ value, colorClass }) {
+    const pct = Math.max(0, Math.min(100, value || 0));
+    return (
+        <div className="h-1.5 rounded-full bg-white/10 overflow-hidden">
+            <div className={`h-full rounded-full ${colorClass}`} style={{ width: `${pct}%` }} />
+        </div>
+    );
+}
+
+function GPUCard({ g }) {
+    return (
+        <Card className="bg-black/40 border-white/10" data-testid={`gpu-card-${g.host}-${g.gpu_index}`}>
+            <CardContent className="p-3 space-y-2.5">
+                <div className="flex items-center gap-2">
+                    <MemoryStick className="w-4 h-4 text-blue-300 shrink-0" />
+                    <div className="min-w-0 flex-1">
+                        <div className="text-sm text-white font-semibold truncate">{g.gpu_name || `GPU ${g.gpu_index}`}</div>
+                        <div className="text-[10px] text-white/45 truncate">{g.host} · idx {g.gpu_index}</div>
+                    </div>
+                    <Badge className="text-[9px] uppercase border-white/15 text-white/60 bg-black/30 border">{g.gpu_vendor || 'unknown'}</Badge>
+                </div>
+                <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-white/50">
+                        <span>Utilization</span><span className="tabular-nums">{(g.utilization_pct ?? 0).toFixed(0)}%</span>
+                    </div>
+                    <ProgressBar value={g.utilization_pct} colorClass="bg-cyan-400" />
+                </div>
+                <div className="space-y-1">
+                    <div className="flex items-center justify-between text-[10px] text-white/50">
+                        <span>Memory</span>
+                        <span className="tabular-nums">{(g.memory_used_mb ?? 0).toFixed(0)} / {(g.memory_total_mb ?? 0).toFixed(0)} MB</span>
+                    </div>
+                    <ProgressBar value={g.memory_pct} colorClass="bg-violet-400" />
+                </div>
+                <div className="grid grid-cols-3 gap-2 pt-1">
+                    <div>
+                        <div className="text-[9px] uppercase tracking-widest text-white/40">Temp</div>
+                        <div className="text-sm font-semibold text-white tabular-nums">{(g.temperature_c ?? 0).toFixed(0)}°C</div>
+                    </div>
+                    <div>
+                        <div className="text-[9px] uppercase tracking-widest text-white/40">Power</div>
+                        <div className="text-sm font-semibold text-white tabular-nums">{(g.power_watts ?? 0).toFixed(0)}W</div>
+                    </div>
+                    <div>
+                        <div className="text-[9px] uppercase tracking-widest text-white/40">Fan</div>
+                        <div className="text-sm font-semibold text-white tabular-nums">{(g.fan_pct ?? 0).toFixed(0)}%</div>
+                    </div>
+                </div>
+            </CardContent>
+        </Card>
+    );
+}
+
+function GPUTab({ refreshKey }) {
+    const [data, setData] = useState(null);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        let cancelled = false;
+        setLoading(true);
+        api('/api/ai-monitoring/gpu?hours=1')
+            .then((d) => !cancelled && setData(d))
+            .catch((e) => toast.error(`GPU load failed: ${e.message}`))
+            .finally(() => !cancelled && setLoading(false));
+        return () => { cancelled = true; };
+    }, [refreshKey]);
+
+    if (loading && !data) {
+        return <div className="text-white/50 text-sm" data-testid="observability-gpu-loading">Loading…</div>;
+    }
+
+    if (!data?.detected) {
+        return (
+            <div className="space-y-3" data-testid="observability-gpu">
+                <Card className="bg-black/40 border-white/10 border-dashed">
+                    <CardContent className="p-8 text-center text-white/45 text-sm">
+                        <MemoryStick className="w-8 h-8 mx-auto mb-2 opacity-40" />
+                        {data?.not_available_reason || 'No GPU metrics reported yet.'}
+                        <br />
+                        <span className="text-[11px] text-white/35">
+                            Add <code className="text-white/50">gpu</code> to <code className="text-white/50">enabled_plugins</code> in a OneAgent host's agent.yaml (requires nvidia-smi or rocm-smi).
+                        </span>
+                    </CardContent>
+                </Card>
+            </div>
+        );
+    }
+
+    const gpus = data.gpus || [];
+    const avgUtil = gpus.reduce((s, g) => s + (g.utilization_pct || 0), 0) / gpus.length;
+    const avgTemp = gpus.reduce((s, g) => s + (g.temperature_c || 0), 0) / gpus.length;
+    const totalUsed = gpus.reduce((s, g) => s + (g.memory_used_mb || 0), 0);
+    const totalMem = gpus.reduce((s, g) => s + (g.memory_total_mb || 0), 0);
+
+    return (
+        <div className="space-y-4" data-testid="observability-gpu">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <Card className="bg-black/40 border-white/10" data-testid="gpu-summary-count">
+                    <CardContent className="p-3">
+                        <div className="text-[10px] uppercase tracking-widest text-white/40">GPUs</div>
+                        <div className="text-xl font-bold text-white tabular-nums mt-0.5">{data.gpu_count}</div>
+                    </CardContent>
+                </Card>
+                <Card className="bg-black/40 border-white/10" data-testid="gpu-summary-utilization">
+                    <CardContent className="p-3">
+                        <div className="text-[10px] uppercase tracking-widest text-white/40">Avg Utilization</div>
+                        <div className="text-xl font-bold text-white tabular-nums mt-0.5">{avgUtil.toFixed(0)}%</div>
+                    </CardContent>
+                </Card>
+                <Card className="bg-black/40 border-white/10" data-testid="gpu-summary-temp">
+                    <CardContent className="p-3">
+                        <div className="text-[10px] uppercase tracking-widest text-white/40">Avg Temp</div>
+                        <div className="text-xl font-bold text-white tabular-nums mt-0.5">{avgTemp.toFixed(0)}°C</div>
+                    </CardContent>
+                </Card>
+                <Card className="bg-black/40 border-white/10" data-testid="gpu-summary-memory">
+                    <CardContent className="p-3">
+                        <div className="text-[10px] uppercase tracking-widest text-white/40">Memory</div>
+                        <div className="text-xl font-bold text-white tabular-nums mt-0.5">{(totalUsed / 1024).toFixed(1)} / {(totalMem / 1024).toFixed(1)}GB</div>
+                    </CardContent>
+                </Card>
+            </div>
+            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {gpus.map((g) => <GPUCard key={`${g.host}-${g.gpu_index}`} g={g} />)}
+            </div>
+        </div>
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // MAIN PAGE
 // ──────────────────────────────────────────────────────────────────────────────
 export default function AIObservabilityPage() {
@@ -744,6 +905,7 @@ export default function AIObservabilityPage() {
                 <TabsList className="bg-black/40 border border-white/10">
                     <TabsTrigger value="overview" data-testid="tab-overview"><Activity className="w-3.5 h-3.5 mr-1.5" />Overview</TabsTrigger>
                     <TabsTrigger value="agents" data-testid="tab-agents"><Cpu className="w-3.5 h-3.5 mr-1.5" />Agents</TabsTrigger>
+                    <TabsTrigger value="gpu" data-testid="tab-gpu"><MemoryStick className="w-3.5 h-3.5 mr-1.5" />GPU</TabsTrigger>
                     <TabsTrigger value="live" data-testid="tab-live"><Radio className="w-3.5 h-3.5 mr-1.5" />Live Feed</TabsTrigger>
                     <TabsTrigger value="log-analyzer" data-testid="tab-log-analyzer"><Terminal className="w-3.5 h-3.5 mr-1.5" />Log Analyzer</TabsTrigger>
                     <TabsTrigger value="policies" data-testid="tab-policies"><Lock className="w-3.5 h-3.5 mr-1.5" />Policies</TabsTrigger>
@@ -751,6 +913,7 @@ export default function AIObservabilityPage() {
                 </TabsList>
                 <TabsContent value="overview" className="mt-4"><OverviewTab refreshKey={refreshKey} /></TabsContent>
                 <TabsContent value="agents" className="mt-4"><AgentsTab refreshKey={refreshKey} /></TabsContent>
+                <TabsContent value="gpu" className="mt-4"><GPUTab refreshKey={refreshKey} /></TabsContent>
                 <TabsContent value="live" className="mt-4"><LiveFeedTab /></TabsContent>
                 <TabsContent value="log-analyzer" className="mt-4"><LogAnalyzerTab /></TabsContent>
                 <TabsContent value="policies" className="mt-4"><PoliciesTab refreshKey={refreshKey} bumpRefresh={bumpRefresh} /></TabsContent>

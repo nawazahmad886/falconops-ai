@@ -17,6 +17,7 @@ import (
 	"github.com/falconops/oneagent/pkg/health"
 	"github.com/falconops/oneagent/pkg/pipeline"
 	"github.com/falconops/oneagent/pkg/plugins"
+	"github.com/falconops/oneagent/pkg/plugins/gpu"
 	"github.com/falconops/oneagent/pkg/plugins/logs"
 	"github.com/falconops/oneagent/pkg/plugins/metrics"
 	"github.com/falconops/oneagent/pkg/plugins/netflow"
@@ -68,6 +69,7 @@ func main() {
 	registry.Register(metrics.New(cfg, pipe, disc, logger))
 	registry.Register(netflow.New(cfg, pipe, disc, logger))
 	registry.Register(traces.New(cfg, pipe, logger))
+	registry.Register(gpu.New(cfg, pipe, logger))
 	registry.StartEnabled(ctx, cfg.EnabledPlugins)
 
 	hs := health.New(cfg, Version, registry, pipe, disc, logger)

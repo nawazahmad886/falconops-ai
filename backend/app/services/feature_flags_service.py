@@ -110,6 +110,12 @@ def _default_config() -> Dict:
             "alert_cooldown_min": 5,
             "max_retention_days": 90,
             "auto_action_allowlist": [],
+            # Agentic AI Workflow — action-broker autonomy level per action (see
+            # action_broker_schema.py). Every Phase-1 action defaults to L0_observe
+            # (recommend/preview only) — nothing executes until an admin explicitly
+            # raises the level, and even then action_broker_schema.execute() itself
+            # always raises NotImplementedError this phase.
+            "agentic_autonomy": {},
         },
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "updated_by": "system",
@@ -141,8 +147,11 @@ async def get_config() -> Dict:
         cfg["deny_patterns"] = list(DEFAULT_BODY_DENY_PATTERNS); changed = True
     if "limits" not in cfg:
         cfg["limits"] = _default_config()["limits"]; changed = True
-    elif "auto_action_allowlist" not in cfg["limits"]:
-        cfg["limits"]["auto_action_allowlist"] = []; changed = True
+    else:
+        if "auto_action_allowlist" not in cfg["limits"]:
+            cfg["limits"]["auto_action_allowlist"] = []; changed = True
+        if "agentic_autonomy" not in cfg["limits"]:
+            cfg["limits"]["agentic_autonomy"] = {}; changed = True
     if changed:
         await db.feature_flags.update_one({"id": "global"}, {"$set": cfg}, upsert=True)
     return cfg

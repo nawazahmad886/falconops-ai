@@ -17,6 +17,11 @@ enabled_plugins:
   - logs
   - metrics
   - traces
+  # - gpu                       # opt-in: only add this on hosts with an NVIDIA
+                                 # or AMD GPU. Requires nvidia-smi or rocm-smi
+                                 # on PATH — if neither is found the plugin
+                                 # fails to start cleanly and reports so via
+                                 # /health (never fabricates a reading).
 
 # ── Sampling / noise reduction ──────────────────────────
 sampling_rate: 1.0            # 0.0-1.0 probabilistic sampling of DEBUG/INFO logs
@@ -33,6 +38,7 @@ log_filters:
 
 # ── Metrics ─────────────────────────────────────────────
 metrics_interval_sec: 30
+# gpu_interval_sec: 30         # only used when the gpu plugin is enabled above
 
 # ── Pipeline / buffering ────────────────────────────────
 batch_max_events: 500

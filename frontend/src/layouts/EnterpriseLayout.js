@@ -96,6 +96,7 @@ import {
     Mail,
     Cloud,
     BrainCircuit,
+    MemoryStick,
 } from 'lucide-react';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -213,7 +214,18 @@ const MODULES = {
             { path: '/ai-observability?tab=log-analyzer', label: 'AI Log Analyzer', icon: Terminal },
             { path: '/ai-observability?tab=policies', label: 'Policies', icon: Shield },
             { path: '/ai-observability?tab=quarantine', label: 'Quarantine Queue', icon: Lock },
+            { path: '/ai-observability?tab=gpu', label: 'GPU Monitoring', icon: MemoryStick },
             { path: '/ai-monitoring', label: 'Legacy Dashboard', icon: BrainCircuit },
+        ]
+    },
+    agentic_workflow: {
+        id: 'agentic_workflow',
+        label: 'Agentic AI Workflow',
+        icon: Sparkles,
+        color: 'text-cyan-400',
+        description: 'Supervisor, Diagnoser, Forecaster — one ask-anything hub',
+        sidebar: [
+            { path: '/agentic-workflow', label: 'Agentic Workflow Hub', icon: Sparkles },
         ]
     },
     security: {
@@ -349,6 +361,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
     const searchResults = [
         { type: 'page', label: 'Problems Console', path: '/problems', icon: AlertTriangle },
         { type: 'page', label: 'Resource Explorer', path: '/resources', icon: Box },
+        { type: 'page', label: 'Agentic AI Workflow', path: '/agentic-workflow', icon: Sparkles },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
@@ -671,6 +684,7 @@ export const EnterpriseLayout = ({ children }) => {
         const path = location.pathname;
         if (path.startsWith('/problems')) return 'problems';
         if (path.startsWith('/resources')) return 'resources';
+        if (path.startsWith('/agentic-workflow')) return 'agentic_workflow';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';

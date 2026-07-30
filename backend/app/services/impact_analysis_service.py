@@ -27,14 +27,19 @@ async def analyze_blast_radius(incident: Dict) -> Dict:
     now = datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=1)).isoformat()
 
-    # 1. Find directly affected services from topology
+    # 1. Find directly affected services from topology.
+    # NOTE: this used to read db.topology_services/db.topology_connections, which
+    # nothing in the app ever writes to (they were a separate, orphaned schema) —
+    # so this panel always reported zero affected services. db.topology_nodes/
+    # db.topology_edges are the real, live collections (populated by
+    # topology_service.auto_discover_from_traces() off real OTLP trace data, and
+    # by the Resource Explorer bridge scheduler) and are what impact_analysis_engine.py
+    # and the Service Map already read.
     affected_services = []
     try:
-        service_nodes = await db.topology_services.find(
-            {"$or": [
-                {"name": {"$regex": re.escape(service), "$options": "i"}} if service else {"_id": None},
-                {"host": host} if host else {"_id": None},
-            ]},
+        name_or_host = service or host
+        service_nodes = await db.topology_nodes.find(
+            {"name": {"$regex": re.escape(name_or_host), "$options": "i"}} if name_or_host else {"_id": None},
             {"_id": 0}
         ).to_list(20)
 
@@ -42,30 +47,33 @@ async def analyze_blast_radius(incident: Dict) -> Dict:
             affected_services.append({
                 "name": svc.get("name", ""),
                 "type": svc.get("type", "service"),
-                "host": svc.get("host", ""),
-                "health": svc.get("health", "unknown"),
+                "host": svc.get("environment", ""),
+                "health": svc.get("status", "unknown"),
                 "impact": "direct",
             })
 
-        # Find downstream dependencies
+        # Find downstream dependents: services that call (depend on) this one, i.e.
+        # what actually breaks if it goes down — same source_id/target_id convention
+        # as topology_service.get_impacted_services (edge.target_id == this service,
+        # edge.source_id == its caller).
         for svc in service_nodes:
             svc_id = svc.get("id", "")
             if svc_id:
-                connections = await db.topology_connections.find(
-                    {"source_id": svc_id},
+                connections = await db.topology_edges.find(
+                    {"target_id": svc_id},
                     {"_id": 0}
                 ).to_list(20)
                 for conn in connections:
-                    target = await db.topology_services.find_one(
-                        {"id": conn.get("target_id")},
+                    target = await db.topology_nodes.find_one(
+                        {"id": conn.get("source_id")},
                         {"_id": 0}
                     )
                     if target:
                         affected_services.append({
                             "name": target.get("name", ""),
                             "type": target.get("type", "service"),
-                            "host": target.get("host", ""),
-                            "health": target.get("health", "unknown"),
+                            "host": target.get("environment", ""),
+                            "health": target.get("status", "unknown"),
                             "impact": "downstream",
                             "connection_type": conn.get("type", "depends_on"),
                         })

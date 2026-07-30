@@ -138,38 +138,49 @@ async def widget_data(
 ):
     """Return live data for each widget type. service/server_id/monitor_id/severity scope a
     widget to one entity for the NOC widget types below — omitted means aggregate/overview mode.
-    Pre-existing widget types below ignore these params (unchanged, backward compatible)."""
+    Pre-existing widget types below ignore these params (unchanged, backward compatible).
+
+    Security fix: every branch below now filters by the requesting user's own
+    tenant_id — previously none of them did, so any logged-in user of any
+    tenant/role could see every other tenant's SOC feed, security threats,
+    alerts, incidents, and (via the "tenants" widget) the full tenant
+    directory including contact emails. The "tenants" widget additionally now
+    requires an admin role, since a personal dashboard widget has no
+    legitimate reason to enumerate other tenants at all — GET /api/tenants
+    (admin-only) already serves that need."""
+    tid = current_user.get("tenant_id")
+    tenant_filter = {"tenant_id": tid} if tid else {}
     try:
         if widget_type == "soc_feed":
-            events = await db.soc_events.find({}, {"_id": 0}).sort("timestamp", -1).limit(8).to_list(8)
+            events = await db.soc_events.find(tenant_filter, {"_id": 0}).sort("timestamp", -1).limit(8).to_list(8)
             return {"events": events, "count": len(events)}
         if widget_type == "uptime":
-            monitors = await db.uptime_monitors.find({}, {"_id": 0}).limit(10).to_list(10)
+            monitors = await db.uptime_monitors.find(tenant_filter, {"_id": 0}).limit(10).to_list(10)
             total = len(monitors)
             up = sum(1 for m in monitors if m.get("status") == "up")
             return {"total": total, "up": up, "down": total - up, "monitors": monitors[:5]}
         if widget_type == "threats":
-            threats = await db.security_threats.find({}, {"_id": 0}).sort("timestamp", -1).limit(10).to_list(10)
+            threats = await db.security_threats.find(tenant_filter, {"_id": 0}).sort("timestamp", -1).limit(10).to_list(10)
             critical = sum(1 for t in threats if t.get("severity") == "critical")
             return {"threats": threats[:5], "count": len(threats), "critical": critical}
         if widget_type == "billing":
-            usage = await db.usage_events.count_documents({})
-            plans = await db.user_plans.count_documents({})
+            usage = await db.usage_events.count_documents(tenant_filter)
+            plans = await db.user_plans.count_documents(tenant_filter)
             return {"total_events": usage, "active_plans": plans}
         if widget_type == "sla":
-            monitors = await db.uptime_monitors.find({}, {"_id": 0}).to_list(100)
+            monitors = await db.uptime_monitors.find(tenant_filter, {"_id": 0}).to_list(100)
             total = len(monitors) or 1
             up = sum(1 for m in monitors if m.get("status") == "up")
             sla = round((up / total) * 100, 2) if total else 100.0
             return {"sla_percent": sla, "total_monitors": total}
         if widget_type == "ai_agents":
-            runs = await db.ai_agent_runs.find({}, {"_id": 0}).sort("created_at", -1).limit(5).to_list(5)
-            return {"runs": runs, "count": await db.ai_agent_runs.count_documents({})}
+            runs = await db.ai_agent_runs.find(tenant_filter, {"_id": 0}).sort("created_at", -1).limit(5).to_list(5)
+            return {"runs": runs, "count": await db.ai_agent_runs.count_documents(tenant_filter)}
         if widget_type == "alerts":
-            alerts = await db.alerts.find({"status": "open"}, {"_id": 0}).limit(10).to_list(10)
+            alerts = await db.alerts.find({"status": "open", **tenant_filter}, {"_id": 0}).limit(10).to_list(10)
             return {"alerts": alerts[:5], "count": len(alerts)}
         if widget_type == "incidents":
-            incidents = await db.incidents.find({"status": {"$ne": "closed"}}, {"_id": 0}).limit(10).to_list(10)
+            incidents = await db.incidents.find({"status": {"$ne": "closed"}, **tenant_filter}, {"_id": 0}).limit(10).to_list(10)
             return {"incidents": incidents[:5], "count": len(incidents)}
         if widget_type == "metrics":
             return {
@@ -177,6 +188,8 @@ async def widget_data(
                 "note": "Live metric snapshot"
             }
         if widget_type == "tenants":
+            if current_user.get("role") != "admin":
+                raise HTTPException(status_code=403, detail="Admin role required for the tenants widget")
             tenants = await db.tenants.find({}, {"_id": 0}).limit(10).to_list(10)
             return {"tenants": tenants[:5], "count": len(tenants)}
 
@@ -185,12 +198,12 @@ async def widget_data(
             now = datetime.now(timezone.utc)
             cur_start = (now - timedelta(hours=1)).isoformat()
             prev_start = (now - timedelta(hours=2)).isoformat()
-            cur_txns = await db.apm_transactions.find({"start_time": {"$gte": cur_start}}, {"_id": 0}).to_list(10000)
+            cur_txns = await db.apm_transactions.find({"start_time": {"$gte": cur_start}, **tenant_filter}, {"_id": 0}).to_list(10000)
             prev_txns = await db.apm_transactions.find(
-                {"start_time": {"$gte": prev_start, "$lt": cur_start}}, {"_id": 0}).to_list(10000)
-            cur_errs = await db.apm_errors.find({"timestamp": {"$gte": cur_start}}, {"_id": 0}).to_list(2000)
+                {"start_time": {"$gte": prev_start, "$lt": cur_start}, **tenant_filter}, {"_id": 0}).to_list(10000)
+            cur_errs = await db.apm_errors.find({"timestamp": {"$gte": cur_start}, **tenant_filter}, {"_id": 0}).to_list(2000)
             prev_errs = await db.apm_errors.find(
-                {"timestamp": {"$gte": prev_start, "$lt": cur_start}}, {"_id": 0}).to_list(2000)
+                {"timestamp": {"$gte": prev_start, "$lt": cur_start}, **tenant_filter}, {"_id": 0}).to_list(2000)
 
             def _window(txns, errs):
                 durations = [t.get("duration_ms", 0) for t in txns if t.get("duration_ms")]
@@ -253,7 +266,7 @@ async def widget_data(
 
         if widget_type == "log_exceptions":
             since = (datetime.now(timezone.utc) - timedelta(minutes=60)).isoformat()
-            q: dict = {"timestamp": {"$gte": since}}
+            q: dict = {"timestamp": {"$gte": since}, **tenant_filter}
             q["severity"] = severity if severity else {"$in": ["error", "critical"]}
             if service:
                 q["service"] = service

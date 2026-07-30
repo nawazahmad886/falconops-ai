@@ -191,13 +191,14 @@ async def incident_analysis(query: str, service: Optional[str] = None,
     # Gather evidence via tools — in parallel. get_agent_status closes a real blind spot:
     # without it, a stale/offline OneAgent just looks like "no logs/metrics/traces" and the
     # agent has no way to tell that apart from "the service is healthy".
+    tid = (user or {}).get("tenant_id")
     logs_t, err_logs_t, metrics_t, traces_t, deploys_t, incidents_t, agent_status_t = await asyncio.gather(
-        tools.get_logs(service=service, minutes=time_range_minutes, limit=30),
-        tools.get_logs(service=service, minutes=time_range_minutes, level="error", limit=40),
-        tools.get_metrics(service=service, minutes=time_range_minutes),
+        tools.get_logs(service=service, minutes=time_range_minutes, limit=30, tenant_id=tid),
+        tools.get_logs(service=service, minutes=time_range_minutes, level="error", limit=40, tenant_id=tid),
+        tools.get_metrics(service=service, minutes=time_range_minutes, tenant_id=tid),
         tools.get_traces(service=service, minutes=max(time_range_minutes, 120), limit=20),
-        tools.get_deployments(service=service),
-        tools.get_incidents(service=service, limit=5),
+        tools.get_deployments(service=service, tenant_id=tid),
+        tools.get_incidents(service=service, limit=5, tenant_id=tid),
         tools.get_agent_status(service=service),
     )
     similar = await rag_service.find_similar_incidents(query, top_k=3, service=service)
@@ -257,6 +258,7 @@ async def incident_analysis(query: str, service: Optional[str] = None,
         "blocked": bool(llm.get("blocked")),
         "duration_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1),
         "user_email": (user or {}).get("email"),
+        "tenant_id": (user or {}).get("tenant_id"),
         "created_at": started.isoformat(),
     }
     await db.ai_intelligence_analyses.insert_one({**doc})
@@ -390,7 +392,8 @@ async def copilot_query(query: str, user: Optional[Dict] = None) -> Dict[str, An
             break  # loop guard: LLM repeated an identical call, stop instead of spinning
         seen_signatures.add(sig)
 
-        raw_result = await tools.execute_tool(plan["tool"], plan.get("params") or {})
+        raw_result = await tools.execute_tool(plan["tool"], plan.get("params") or {},
+                                              tenant_id=(user or {}).get("tenant_id"))
         tagged_results.append(_tag_tool_result(raw_result, pool, counters))
         tool_trace.append({"tool": plan["tool"], "params": plan.get("params"),
                            "summary": raw_result.get("summary"), "count": raw_result.get("count")})
@@ -443,6 +446,7 @@ async def copilot_query(query: str, user: Optional[Dict] = None) -> Dict[str, An
         "blocked": blocked,
         "duration_ms": round((datetime.now(timezone.utc) - started).total_seconds() * 1000, 1),
         "user_email": (user or {}).get("email"),
+        "tenant_id": (user or {}).get("tenant_id"),
         "created_at": started.isoformat(),
     }
     await db.ai_intelligence_analyses.insert_one({**doc})

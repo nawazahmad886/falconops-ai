@@ -5,14 +5,17 @@ Time-Series Metrics Service with Redis Streams Pipeline
 import uuid
 import asyncio
 import json
+import logging
 import numpy as np
 import httpx
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Union
 from scipy import stats
 import os
 import redis.asyncio as redis
 from ..core.database import db
+
+logger = logging.getLogger(__name__)
 
 # Redis connection (optional - falls back to MongoDB if unavailable)
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -64,24 +67,65 @@ TIME_BUCKETS = {
 }
 
 
+_indexes_ready = False
+
+
+async def _ensure_indexes() -> None:
+    """db.metrics_timeseries had zero indexes anywhere in the running app (only in a
+    generated on-prem install script nothing ever executes) — every query_metrics/
+    predict_capacity/get_anomalies call was a full collection scan. Same lazy
+    ensure-once-on-first-real-call pattern as ai_monitoring_service/
+    resource_explorer_service."""
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        # Covers predict_capacity/predict_all_hosts's {name, tags.host, timestamp range}
+        # and query_metrics/get_top_metrics's {name, timestamp range} (a prefix of this
+        # same index) in one index.
+        await db.metrics_timeseries.create_index(
+            [("name", 1), ("tags.host", 1), ("timestamp", 1)],
+            name="metrics_name_host_ts")
+        await db.metrics_timeseries.create_index(
+            [("tenant_id", 1), ("name", 1), ("timestamp", 1)],
+            name="metrics_tenant_name_ts")
+        await db.metrics_timeseries.create_index(
+            [("anomaly.is_anomaly", 1), ("timestamp", -1)],
+            name="metrics_anomaly_ts")
+        _indexes_ready = True
+    except Exception as e:
+        logger.warning("metrics_timeseries index creation skipped: %s", e)
+
+
 class MetricsTimeSeriesService:
     """Enterprise-grade time-series metrics service"""
-    
+
     def __init__(self):
         self.redis_pool = None
         self._baseline_cache = {}  # Cache for baseline calculations
-    
+
     async def get_redis(self) -> Optional[redis.Redis]:
         """Get Redis connection (returns None if unavailable)"""
         if self.redis_pool is None:
             try:
                 self.redis_pool = redis.from_url(REDIS_URL, decode_responses=True)
                 await self.redis_pool.ping()
-            except Exception:
+            except Exception as e:
                 self.redis_pool = None
+                # Previously swallowed silently — main.py logged "Metrics stream
+                # processor started" regardless, so a Redis outage produced zero
+                # signal anywhere that ingestion had actually stopped. See
+                # self_monitor.py's background_jobs task-liveness check, which
+                # now surfaces process_stream() exiting early because of this.
+                logger.warning(
+                    "MetricsTimeSeriesService: Redis unreachable at %s (%s) — "
+                    "metrics ingestion falls back to direct MongoDB writes; the "
+                    "stream-based process_stream() background task will not run.",
+                    REDIS_URL, e,
+                )
                 return None
         return self.redis_pool
-    
+
     async def initialize_stream(self):
         """Initialize Redis stream and consumer group"""
         try:
@@ -95,7 +139,7 @@ class MetricsTimeSeriesService:
                 if "BUSYGROUP" not in str(e):
                     raise
         except Exception as e:
-            print(f"Redis stream initialization (non-fatal): {e}")
+            logger.warning("Redis stream initialization failed (non-fatal, falls back to direct MongoDB writes): %s", e)
     
     # ==================== INGESTION ====================
     
@@ -110,6 +154,7 @@ class MetricsTimeSeriesService:
         tenant_id: Optional[str] = None
     ) -> Dict:
         """Ingest a single metric into the stream"""
+        await _ensure_indexes()
         metric_id = str(uuid.uuid4())
         ts = timestamp or datetime.now(timezone.utc).isoformat()
         
@@ -144,6 +189,7 @@ class MetricsTimeSeriesService:
         tenant_id: Optional[str] = None
     ) -> Dict:
         """Ingest multiple metrics at once"""
+        await _ensure_indexes()
         now = datetime.now(timezone.utc).isoformat()
         queued = 0
         
@@ -236,9 +282,19 @@ class MetricsTimeSeriesService:
     # ==================== STREAM PROCESSING ====================
     
     async def process_stream(self, batch_size: int = 100, block_ms: int = 1000):
-        """Process metrics from Redis stream (worker function)"""
+        """Process metrics from Redis stream (worker function). Returns almost
+        immediately (a "successfully" completed asyncio.Task, not a crash) when
+        Redis is unreachable — self_monitor.py's background-jobs check treats an
+        early-completed task for this scheduler as a real failure signal, since
+        this coroutine is only ever meant to return once cancelled at shutdown."""
         r = await self.get_redis()
         if r is None:
+            logger.warning(
+                "MetricsTimeSeriesService.process_stream: exiting immediately, "
+                "no Redis connection — metrics ingested via ingest_metric/ingest_batch "
+                "still land in MongoDB directly, but stream-based anomaly detection "
+                "on ingested points will not run."
+            )
             return
         consumer_name = f"processor-{uuid.uuid4().hex[:8]}"
         
@@ -573,29 +629,36 @@ class MetricsTimeSeriesService:
     async def get_top_metrics(
         self,
         metric_name: str,
-        group_by: str = "host",
+        group_by: Union[str, List[str]] = "host",
         aggregation: str = "avg",
         limit: int = 10,
         start_time: Optional[str] = None,
         tenant_id: Optional[str] = None
     ) -> List[Dict]:
-        """Get top N metrics grouped by a tag dimension"""
+        """Get top N metrics grouped by a tag dimension, or a compound key when
+        group_by is a list (e.g. ["host", "gpu_index"] to identify one physical
+        GPU across multiple hosts — a single tag can't disambiguate that alone).
+        Backward compatible: a plain string keeps the original flat {group_by: value, ...} shape."""
         if not start_time:
             start_time = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
-        
+
         query = {
             "name": metric_name,
             "timestamp": {"$gte": start_time}
         }
         if tenant_id:
             query["tenant_id"] = tenant_id
-        
-        group_field = f"$tags.{group_by}"
-        
+
+        group_fields = [group_by] if isinstance(group_by, str) else list(group_by)
+        id_expr = (
+            f"$tags.{group_fields[0]}" if len(group_fields) == 1
+            else {g: f"$tags.{g}" for g in group_fields}
+        )
+
         pipeline = [
             {"$match": query},
             {"$group": {
-                "_id": group_field,
+                "_id": id_expr,
                 "avg_value": {"$avg": "$value"},
                 "max_value": {"$max": "$value"},
                 "min_value": {"$min": "$value"},
@@ -606,18 +669,26 @@ class MetricsTimeSeriesService:
             {"$sort": {"avg_value" if aggregation == "avg" else "max_value": -1}},
             {"$limit": limit}
         ]
-        
+
         results = await db.metrics_timeseries.aggregate(pipeline).to_list(limit)
-        
-        return [{
-            group_by: r["_id"] or "unknown",
-            "avg": round(r["avg_value"], 2),
-            "max": round(r["max_value"], 2),
-            "min": round(r["min_value"], 2),
-            "count": r["count"],
-            "last_value": round(r["last_value"], 2),
-            "last_timestamp": r["last_timestamp"]
-        } for r in results]
+
+        out = []
+        for r in results:
+            row: Dict[str, Any] = {}
+            if len(group_fields) == 1:
+                row[group_fields[0]] = r["_id"] or "unknown"
+            else:
+                row.update({g: (r["_id"] or {}).get(g) for g in group_fields})
+            row.update({
+                "avg": round(r["avg_value"], 2),
+                "max": round(r["max_value"], 2),
+                "min": round(r["min_value"], 2),
+                "count": r["count"],
+                "last_value": round(r["last_value"], 2),
+                "last_timestamp": r["last_timestamp"],
+            })
+            out.append(row)
+        return out
     
     # ==================== ANOMALY DETECTION ====================
     

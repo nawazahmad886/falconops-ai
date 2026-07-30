@@ -29,12 +29,64 @@ jobs:
           cd backend
           pip install -r requirements.txt
           pip install pytest pytest-asyncio httpx
+      - name: Start backend (uvicorn)
+        env:
+          MONGO_URL: mongodb://localhost:27017
+          DB_NAME: test_ci
+          JWT_SECRET_KEY: ci_test_secret
+          LLM_PROVIDER: rule_based
+        run: |
+          cd backend
+          nohup uvicorn main:app --host 0.0.0.0 --port 8001 --log-level info > /tmp/backend.log 2>&1 &
+          echo $! > /tmp/backend.pid
+      - name: Wait for backend health check
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8001/api/health > /dev/null 2>&1; then
+              echo "Backend is up"
+              exit 0
+            fi
+            echo "Waiting for backend... ($i/30)"
+            sleep 2
+          done
+          echo "Backend never became healthy — dumping logs:"
+          cat /tmp/backend.log
+          exit 1
+      - name: Seed CI admin account
+        # The whole test suite authenticates as admin@falconapps.com/Admin@123,
+        # but nothing in the app itself seeds this user (registration always
+        # creates role="user" — confirmed no first-user-becomes-admin logic
+        # exists). Without this step every test's auth fixture would silently
+        # skip (not fail) on a fresh CI database, making the "backend now
+        # starts" fix above meaningless in practice.
+        run: |
+          curl -fsS -X POST http://localhost:8001/api/auth/register \
+            -H "Content-Type: application/json" \
+            -d '{"email":"admin@falconapps.com","password":"Admin@123","full_name":"CI Admin","organization":"FalconOps CI"}' \
+            > /dev/null
+          python3 -c "
+          from pymongo import MongoClient
+          client = MongoClient('mongodb://localhost:27017')
+          result = client['test_ci'].users.update_one(
+              {'email': 'admin@falconapps.com'}, {'\$set': {'role': 'admin'}}
+          )
+          assert result.matched_count == 1, 'CI admin user was not created by /api/auth/register'
+          print('CI admin promoted to role=admin')
+          "
       - name: Run tests
         env:
           MONGO_URL: mongodb://localhost:27017
           DB_NAME: test_ci
           JWT_SECRET_KEY: ci_test_secret
+          TEST_BASE_URL: http://localhost:8001
+          REACT_APP_BACKEND_URL: http://localhost:8001
         run: cd backend && python -m pytest tests/ -v --tb=short
+      - name: Dump backend logs on failure
+        if: failure()
+        run: cat /tmp/backend.log || true
+      - name: Stop backend
+        if: always()
+        run: kill "$(cat /tmp/backend.pid)" 2>/dev/null || true
 
   test-frontend:
     runs-on: ubuntu-latest
@@ -42,11 +94,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
-      - name: Install & build
-        run: |
-          cd frontend
-          yarn install --frozen-lockfile
-          REACT_APP_BACKEND_URL=http://localhost:8001 yarn build
+      - name: Install
+        run: cd frontend && yarn install --frozen-lockfile
+      - name: Run tests
+        env:
+          CI: true
+        run: cd frontend && yarn test --watchAll=false
+      - name: Build
+        run: cd frontend && REACT_APP_BACKEND_URL=http://localhost:8001 yarn build
 
   build-and-push:
     needs: [test-backend, test-frontend]

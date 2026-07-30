@@ -29,6 +29,22 @@ def _tid(user):
     return user.get("tenant_id") if user else None
 
 
+async def migrate_monitor_dependencies() -> dict:
+    """One-time, idempotent: db.service_dependencies used to be written by two
+    incompatible producers — this router's manual monitor-to-monitor CRUD
+    ({source_monitor_id, target_monitor_id, ...}) and otlp_routes.py's trace-derived
+    auto-discovery ({service, depends_on, ...}). Any doc with the monitor shape
+    still sitting in db.service_dependencies (from before this split) is moved into
+    its own db.monitor_dependencies collection here; otlp_routes.py's docs are left
+    untouched. Safe to run on every boot."""
+    docs = await db.service_dependencies.find({"source_monitor_id": {"$exists": True}}, {"_id": 0}).to_list(10000)
+    if not docs:
+        return {"migrated": 0}
+    await db.monitor_dependencies.insert_many(docs)
+    await db.service_dependencies.delete_many({"source_monitor_id": {"$exists": True}})
+    return {"migrated": len(docs)}
+
+
 @router.get("", response_model=NetworkTopologyResponse)
 async def get_network_topology(
     environment: Optional[str] = Query(None),
@@ -44,7 +60,11 @@ async def get_network_topology(
     
     monitors = await db.monitors.find(query, {"_id": 0}).to_list(500)
     dep_q = {"tenant_id": tid} if tid else {}
-    dependencies = await db.service_dependencies.find(dep_q, {"_id": 0}).to_list(1000)
+    # db.monitor_dependencies (not db.service_dependencies — that collection is the
+    # trace-derived service/depends_on graph auto-built by otlp_routes.py, an
+    # incompatible schema that used to crash this endpoint via KeyError on
+    # source_monitor_id/target_monitor_id).
+    dependencies = await db.monitor_dependencies.find(dep_q, {"_id": 0}).to_list(1000)
     
     dep_map = {}
     dependent_map = {}
@@ -142,27 +162,27 @@ async def get_network_topology(
 
 @router.get("/dependencies")
 async def get_dependencies(current_user: Optional[dict] = Depends(get_current_user)):
-    """Get all service dependencies"""
-    deps = await db.service_dependencies.find({}, {"_id": 0}).to_list(1000)
+    """Get all monitor-to-monitor dependencies (manually mapped)"""
+    deps = await db.monitor_dependencies.find({}, {"_id": 0}).to_list(1000)
     return deps
 
 
 @router.post("/dependencies")
 async def create_dependency(dep: ServiceDependencyCreate, current_user: dict = Depends(require_write_access)):
-    """Create a service dependency"""
+    """Create a monitor-to-monitor dependency"""
     source = await db.monitors.find_one({"id": dep.source_monitor_id})
     target = await db.monitors.find_one({"id": dep.target_monitor_id})
-    
+
     if not source or not target:
         raise HTTPException(status_code=404, detail="Source or target monitor not found")
-    
-    existing = await db.service_dependencies.find_one({
+
+    existing = await db.monitor_dependencies.find_one({
         "source_monitor_id": dep.source_monitor_id,
         "target_monitor_id": dep.target_monitor_id
     })
     if existing:
         raise HTTPException(status_code=400, detail="Dependency already exists")
-    
+
     dep_doc = {
         "id": str(uuid.uuid4()),
         "source_monitor_id": dep.source_monitor_id,
@@ -172,15 +192,15 @@ async def create_dependency(dep: ServiceDependencyCreate, current_user: dict = D
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user["email"]
     }
-    
-    await db.service_dependencies.insert_one(dep_doc)
+
+    await db.monitor_dependencies.insert_one(dep_doc)
     return {k: v for k, v in dep_doc.items() if k != "_id"}
 
 
 @router.delete("/dependencies/{dep_id}")
 async def delete_dependency(dep_id: str, current_user: dict = Depends(require_write_access)):
-    """Delete a service dependency"""
-    result = await db.service_dependencies.delete_one({"id": dep_id})
+    """Delete a monitor-to-monitor dependency"""
+    result = await db.monitor_dependencies.delete_one({"id": dep_id})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Dependency not found")
     return {"message": "Dependency deleted"}
@@ -192,8 +212,8 @@ async def get_impact_analysis(monitor_id: str, current_user: Optional[dict] = De
     monitor = await db.monitors.find_one({"id": monitor_id}, {"_id": 0})
     if not monitor:
         raise HTTPException(status_code=404, detail="Monitor not found")
-    
-    dependencies = await db.service_dependencies.find({}, {"_id": 0}).to_list(1000)
+
+    dependencies = await db.monitor_dependencies.find({}, {"_id": 0}).to_list(1000)
     
     def find_dependents(mid, visited=None):
         if visited is None:

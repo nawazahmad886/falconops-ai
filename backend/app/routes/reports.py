@@ -14,7 +14,7 @@ from ..models.schemas import (
     ScheduledReportCreate, ScheduledReportResponse, 
     ExecutiveReportResponse, ReportDateRange
 )
-from ..utils.auth import require_auth, require_write_access, get_current_user
+from ..utils.auth import require_auth, require_write_access
 from ..services.reports_service import (
     generate_uptime_report,
     generate_executive_report_data,
@@ -42,11 +42,11 @@ def get_default_dates():
 async def get_uptime_report(
     hours: int = Query(24, ge=1, le=720),
     monitor_ids: Optional[str] = Query(None, description="Comma-separated monitor IDs"),
-    current_user: Optional[dict] = Depends(get_current_user)
+    current_user: dict = Depends(require_auth)
 ):
     """Get uptime report for specified period"""
     ids = monitor_ids.split(",") if monitor_ids else None
-    return await generate_uptime_report(period_hours=hours, monitor_ids=ids)
+    return await generate_uptime_report(period_hours=hours, monitor_ids=ids, tenant_id=_tid(current_user))
 
 
 @router.get("/executive", response_model=ExecutiveReportResponse)
@@ -54,13 +54,13 @@ async def get_executive_report(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
     include_ai_summary: bool = Query(True),
-    current_user: Optional[dict] = Depends(get_current_user)
+    current_user: dict = Depends(require_auth)
 ):
     """Get executive report with KPIs and AI summary"""
     if not start_date or not end_date:
         start_date, end_date = get_default_dates()
-    
-    report_data = await generate_executive_report_data(start_date, end_date, include_ai_summary)
+
+    report_data = await generate_executive_report_data(start_date, end_date, include_ai_summary, tenant_id=_tid(current_user))
     return ExecutiveReportResponse(
         period=report_data["period"],
         kpis=report_data["kpis"],
@@ -77,37 +77,40 @@ async def get_executive_report(
 async def get_sla_report(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    current_user: Optional[dict] = Depends(get_current_user)
+    current_user: dict = Depends(require_auth)
 ):
     """Get SLA compliance report"""
     if not start_date or not end_date:
         start_date, end_date = get_default_dates()
-    return await generate_sla_report_data(start_date, end_date)
+    return await generate_sla_report_data(start_date, end_date, tenant_id=_tid(current_user))
 
 
 @router.get("/incidents")
 async def get_incidents_report(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    current_user: Optional[dict] = Depends(get_current_user)
+    current_user: dict = Depends(require_auth)
 ):
     """Get incident analytics report"""
     if not start_date or not end_date:
         start_date, end_date = get_default_dates()
-    return await generate_incident_report_data(start_date, end_date)
+    return await generate_incident_report_data(start_date, end_date, tenant_id=_tid(current_user))
 
 
 @router.get("/team-performance")
 async def get_team_performance_report(
     start_date: Optional[str] = Query(None),
     end_date: Optional[str] = Query(None),
-    current_user: Optional[dict] = Depends(get_current_user)
+    current_user: dict = Depends(require_auth)
 ):
     """Get team performance metrics"""
     if not start_date or not end_date:
         start_date, end_date = get_default_dates()
-    
-    incidents = await db.incidents.find({}, {"_id": 0}).to_list(1000)
+
+    tenant_id = _tid(current_user)
+    incidents = await db.incidents.find(
+        {**({"tenant_id": tenant_id} if tenant_id else {})}, {"_id": 0}
+    ).to_list(1000)
     
     resolved = [i for i in incidents if i.get("status") == "resolved"]
     mttr_values = [i.get("mttr_seconds", 0) for i in resolved if i.get("mttr_seconds")]

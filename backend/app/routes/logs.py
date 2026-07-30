@@ -2,6 +2,7 @@
 FalconOps AI - Logs Monitoring Routes
 API endpoints for log ingestion, analysis, and AI-powered insights
 """
+import logging
 import re
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -27,6 +28,28 @@ from ..services.ai_copilot_service import (
 )
 
 router = APIRouter(prefix="/api/logs", tags=["Logs Monitoring"])
+
+logger = logging.getLogger(__name__)
+
+_indexes_ready = False
+
+
+async def _ensure_indexes() -> None:
+    """db.logs had zero indexes anywhere in the running app (the only real
+    index-creation code lived in logs_service.py, which nothing imports) — every
+    GET /api/logs / /analyze / /deduplicate / /correlate / /anomalies call was a
+    full collection scan. Same lazy ensure-once-on-first-write pattern used by
+    ai_monitoring_service/resource_explorer_service/metrics_timeseries_service."""
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        await db.logs.create_index([("timestamp", -1)], name="logs_ts")
+        await db.logs.create_index([("tenant_id", 1), ("timestamp", -1)], name="logs_tenant_ts")
+        await db.logs.create_index([("service", 1), ("timestamp", -1)], name="logs_service_ts")
+        _indexes_ready = True
+    except Exception:
+        logger.warning("logs index creation skipped", exc_info=True)
 
 
 def _tid(user):
@@ -63,6 +86,7 @@ class RCARequest(BaseModel):
 @router.post("/ingest")
 async def ingest_log(log: LogEntry, current_user: Optional[dict] = Depends(get_current_user)):
     """Ingest a single log entry"""
+    await _ensure_indexes()
     # Parse and enrich the log
     parsed = parse_log(log.message)
     
@@ -90,6 +114,7 @@ async def ingest_log(log: LogEntry, current_user: Optional[dict] = Depends(get_c
 @router.post("/ingest/batch")
 async def ingest_logs_batch(batch: LogBatchIngest, current_user: Optional[dict] = Depends(get_current_user)):
     """Ingest multiple log entries"""
+    await _ensure_indexes()
     ingested = []
     
     for log in batch.logs:
@@ -205,8 +230,11 @@ async def analyze_logs_endpoint(
 ):
     """AI-powered log analysis"""
     time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-    
+
     query = {"timestamp": {"$gte": time_threshold.isoformat()}}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
     if service:
         query["service"] = service
     
@@ -225,6 +253,7 @@ async def analyze_logs_endpoint(
         "service_filter": service,
         "hours": hours,
         "analysis": analysis,
+        "tenant_id": tid,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": current_user.get("email")
     }
@@ -241,8 +270,11 @@ async def deduplicate_logs_endpoint(
 ):
     """Deduplicate logs and return summary"""
     time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-    
+
     query = {"timestamp": {"$gte": time_threshold.isoformat()}}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
     if service:
         query["service"] = service
     
@@ -261,11 +293,12 @@ async def correlate_logs_endpoint(
 ):
     """Correlate logs into event groups"""
     time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-    
-    logs = await db.logs.find(
-        {"timestamp": {"$gte": time_threshold.isoformat()}},
-        {"_id": 0}
-    ).limit(5000).to_list(5000)
+
+    query = {"timestamp": {"$gte": time_threshold.isoformat()}}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    logs = await db.logs.find(query, {"_id": 0}).limit(5000).to_list(5000)
     
     correlations = await correlate_logs(logs, time_window)
     
@@ -285,11 +318,12 @@ async def detect_anomalies(
 ):
     """Detect anomalies in recent logs"""
     time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-    
-    logs = await db.logs.find(
-        {"timestamp": {"$gte": time_threshold.isoformat()}},
-        {"_id": 0}
-    ).limit(5000).to_list(5000)
+
+    query = {"timestamp": {"$gte": time_threshold.isoformat()}}
+    tid = _tid(current_user)
+    if tid:
+        query["tenant_id"] = tid
+    logs = await db.logs.find(query, {"_id": 0}).limit(5000).to_list(5000)
     
     detector = LogAnomalyDetector(history_hours=24)
     anomalies = await detector.detect_anomalies(logs)

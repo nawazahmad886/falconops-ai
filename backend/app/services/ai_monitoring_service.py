@@ -848,6 +848,7 @@ async def evaluate_exchange(
     user_id: Optional[str] = None,
     source: str = "ai_copilot",
     skip_llm_agents: bool = False,
+    tenant_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run all active agents in parallel on one LLM exchange. Persist + return verdict.
 
@@ -907,6 +908,7 @@ async def evaluate_exchange(
         "source": source,
         "session_id": session_id,
         "user_id": user_id,
+        "tenant_id": tenant_id,
         "model": model,
         "provider": provider,
         "user_input": user_input[:2000],

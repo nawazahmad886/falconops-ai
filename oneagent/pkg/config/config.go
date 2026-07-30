@@ -33,6 +33,7 @@ type Config struct {
 
 	MetricsIntervalSec int    `yaml:"metrics_interval_sec"`
 	NetflowIntervalSec int    `yaml:"netflow_interval_sec"`
+	GPUIntervalSec     int    `yaml:"gpu_interval_sec"`
 	BatchMaxEvents     int    `yaml:"batch_max_events"`
 	BatchMaxWaitSec    int    `yaml:"batch_max_wait_sec"`
 	BufferDir          string `yaml:"buffer_dir"`
@@ -54,6 +55,7 @@ func defaults() *Config {
 		LogFilters:         LogFilters{MinLevel: "info"},
 		MetricsIntervalSec: 30,
 		NetflowIntervalSec: 20,
+		GPUIntervalSec:     30,
 		BatchMaxEvents:     500,
 		BatchMaxWaitSec:    5,
 		BufferDir:          "/var/lib/falconops/buffer",
@@ -119,6 +121,13 @@ func (c *Config) NetflowInterval() time.Duration {
 		return 20 * time.Second
 	}
 	return time.Duration(c.NetflowIntervalSec) * time.Second
+}
+
+func (c *Config) GPUInterval() time.Duration {
+	if c.GPUIntervalSec < 5 {
+		return 30 * time.Second
+	}
+	return time.Duration(c.GPUIntervalSec) * time.Second
 }
 
 func (c *Config) PluginEnabled(name string) bool {

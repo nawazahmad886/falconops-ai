@@ -25,9 +25,11 @@ def _cutoff(minutes: int) -> str:
 
 async def get_logs(service: Optional[str] = None, minutes: int = 60,
                    level: Optional[str] = None, search: Optional[str] = None,
-                   limit: int = 50) -> Dict[str, Any]:
+                   limit: int = 50, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query application logs (db.logs)."""
     q: Dict[str, Any] = {"timestamp": {"$gte": _cutoff(minutes)}}
+    if tenant_id:
+        q["tenant_id"] = tenant_id
     if service:
         q["service"] = service
     if level:
@@ -58,7 +60,7 @@ async def get_logs(service: Optional[str] = None, minutes: int = 60,
 
 
 async def get_metrics(service: Optional[str] = None, metric_name: Optional[str] = None,
-                      minutes: int = 60) -> Dict[str, Any]:
+                      minutes: int = 60, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query metrics timeseries. If metric_name given → aggregated series; else catalog + latest values."""
     from .metrics_timeseries_service import metrics_timeseries_service
     params = {"service": service, "metric_name": metric_name, "minutes": minutes}
@@ -66,7 +68,8 @@ async def get_metrics(service: Optional[str] = None, metric_name: Optional[str] 
     if metric_name:
         tags = {"service": service} if service else None
         result = await metrics_timeseries_service.query_metrics(
-            metric_name=metric_name, start_time=start, tags=tags, aggregation="avg", bucket="5m")
+            metric_name=metric_name, start_time=start, tags=tags, aggregation="avg", bucket="5m",
+            tenant_id=tenant_id)
         series = result.get("series", result.get("data", []))
         vals = [p.get("value") for p in series if isinstance(p, dict) and p.get("value") is not None]
         stats = {}
@@ -78,6 +81,8 @@ async def get_metrics(service: Optional[str] = None, metric_name: Optional[str] 
                 "summary": f"Metric '{metric_name}': {stats or 'no data'} over last {minutes}m"}
     # Catalog mode: latest value per metric name
     q: Dict[str, Any] = {"timestamp": {"$gte": start}}
+    if tenant_id:
+        q["tenant_id"] = tenant_id
     if service:
         q["tags.service"] = service
     pipeline = [
@@ -126,10 +131,13 @@ async def get_traces(service: Optional[str] = None, trace_id: Optional[str] = No
             "summary": f"{len(rows)} trace(s), {err_count} with errors, in last {minutes}m"}
 
 
-async def get_deployments(service: Optional[str] = None, minutes: int = 1440) -> Dict[str, Any]:
+async def get_deployments(service: Optional[str] = None, minutes: int = 1440,
+                          tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Detect deployment / release / rollout events from logs."""
     q: Dict[str, Any] = {"timestamp": {"$gte": _cutoff(minutes)},
                          "message": {"$regex": r"deploy|rollout|release|version bump|config change", "$options": "i"}}
+    if tenant_id:
+        q["tenant_id"] = tenant_id
     if service:
         q["service"] = service
     rows = await db.logs.find(q, {"_id": 0, "embedding": 0}).sort("timestamp", -1).limit(50).to_list(50)
@@ -141,9 +149,15 @@ async def get_deployments(service: Optional[str] = None, minutes: int = 1440) ->
 
 
 async def get_incidents(service: Optional[str] = None, status: Optional[str] = None,
-                        limit: int = 10) -> Dict[str, Any]:
-    """Query the incidents collection (open + recent)."""
+                        limit: int = 10, tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """Query the incidents collection (open + recent). NOTE: db.incidents has
+    historically inconsistent tenant_id tagging (some writers set it, most don't) —
+    filtering when tenant_id is set is still strictly correct (never leaks another
+    tenant's incidents) even though it may under-report a single tenant's own
+    untagged legacy incidents."""
     q: Dict[str, Any] = {}
+    if tenant_id:
+        q["tenant_id"] = tenant_id
     if service:
         q["service"] = service
     if status:
@@ -206,7 +220,13 @@ async def get_agent_status(service: Optional[str] = None, host: Optional[str] = 
 
 async def get_threats(status: Optional[str] = "active", severity: Optional[str] = None,
                       limit: int = 50) -> Dict[str, Any]:
-    """Query detected security threats (db.security_threats)."""
+    """Query detected security threats (db.security_threats).
+    NOTE: not tenant-scoped — db.security_threats is never tagged with tenant_id by
+    any of its writers (soc_ingestion_service/security_service/attack_simulator_service),
+    unlike db.security_events. Fixing that requires tagging tenant_id at threat-detection
+    time across those three writers, a larger change than this pass covers; flagged, not
+    silently patched with a filter that would just return zero results for every
+    multi-tenant caller."""
     from .security_service import get_threats as _get_threats
     rows = await _get_threats(status=status, severity=severity, limit=limit)
     return {"tool": "get_threats", "params": {"status": status, "severity": severity, "limit": limit},
@@ -216,30 +236,32 @@ async def get_threats(status: Optional[str] = "active", severity: Optional[str] 
 
 async def get_security_events(hours: int = 24, category: Optional[str] = None,
                               severity: Optional[str] = None, search: Optional[str] = None,
-                              limit: int = 100) -> Dict[str, Any]:
+                              limit: int = 100, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query raw security events (db.security_events)."""
     from .security_service import get_security_events as _get_security_events
     result = await _get_security_events(hours=hours, category=category, severity=severity,
-                                        search=search, limit=limit)
+                                        search=search, limit=limit, tenant_id=tenant_id)
     rows = result.get("events", [])
     return {"tool": "get_security_events", "params": {"hours": hours, "category": category, "severity": severity},
             "count": result.get("total", len(rows)), "data": rows,
             "summary": f"{result.get('total', len(rows))} security event(s) in last {hours}h"}
 
 
-async def get_ueba_profiles(hours: int = 168, insider_only: bool = False) -> Dict[str, Any]:
+async def get_ueba_profiles(hours: int = 168, insider_only: bool = False,
+                            tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query UEBA behavioral risk profiles, optionally filtered to insider-threat candidates."""
     from .ueba_service import build_user_profiles, get_insider_threat_candidates
-    rows = await (get_insider_threat_candidates(hours) if insider_only else build_user_profiles(hours))
+    rows = await (get_insider_threat_candidates(hours, tenant_id=tenant_id) if insider_only
+                  else build_user_profiles(hours, tenant_id=tenant_id))
     return {"tool": "get_ueba_profiles", "params": {"hours": hours, "insider_only": insider_only},
             "count": len(rows), "data": rows[:30],
             "summary": f"{len(rows)} user profile(s)" + (" (insider-threat candidates only)" if insider_only else "")}
 
 
-async def get_vulnerabilities(limit: int = 20) -> Dict[str, Any]:
+async def get_vulnerabilities(limit: int = 20, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query prioritized vulnerabilities (CVSS + real topology-derived asset criticality)."""
     from .vulnerability_service import get_vulnerability_dashboard
-    dash = await get_vulnerability_dashboard()
+    dash = await get_vulnerability_dashboard(tenant_id=tenant_id)
     rows = dash.get("top_priority", [])[:limit]
     return {"tool": "get_vulnerabilities", "params": {"limit": limit},
             "count": dash.get("total_vulnerabilities", len(rows)), "data": rows,
@@ -256,28 +278,29 @@ async def get_mitre_matrix(hours: int = 24) -> Dict[str, Any]:
             "summary": f"{matrix.get('total_tagged_events', 0)} MITRE-tagged event(s) in last {hours}h"}
 
 
-async def get_compliance_status(framework: Optional[str] = None) -> Dict[str, Any]:
+async def get_compliance_status(framework: Optional[str] = None,
+                                tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query compliance control status (SOC2/ISO27001) — controls without a real backing
     signal report status 'unknown', never a fabricated pass."""
     from .compliance_service import get_compliance_dashboard, evaluate_compliance
     if framework:
-        result = await evaluate_compliance(framework)
+        result = await evaluate_compliance(framework, tenant_id=tenant_id)
         rows = result.get("controls", [])
         return {"tool": "get_compliance_status", "params": {"framework": framework},
                 "count": len(rows), "data": rows,
                 "summary": f"{framework}: {result.get('compliance_score')}% controls passing"}
-    dash = await get_compliance_dashboard()
+    dash = await get_compliance_dashboard(tenant_id=tenant_id)
     return {"tool": "get_compliance_status", "params": {"framework": None},
             "count": len(dash.get("frameworks", [])), "data": dash.get("frameworks", []),
             "summary": "Compliance overview across all frameworks"}
 
 
-async def get_topology_summary() -> Dict[str, Any]:
+async def get_topology_summary(tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Query the service topology (nodes/edges) and overall system risk score."""
     from .topology_service import topology_service
     from .impact_analysis_engine import impact_analysis_engine
-    topo = await topology_service.get_topology()
-    risk = await impact_analysis_engine.get_system_risk_summary()
+    topo = await topology_service.get_topology(tenant_id=tenant_id)
+    risk = await impact_analysis_engine.get_system_risk_summary(tenant_id=tenant_id)
     return {"tool": "get_topology_summary", "params": {},
             "count": topo.get("node_count", 0), "data": {"topology": topo, "system_risk": risk},
             "summary": f"{topo.get('node_count', 0)} service(s) in topology, "
@@ -333,12 +356,14 @@ async def get_capacity_forecast(threshold: float = 90, horizon: str = "24h") -> 
             "summary": f"{len(alerts)} host/metric combination(s) approaching capacity thresholds within {horizon}"}
 
 
-async def get_sla_risk(limit: int = 20) -> Dict[str, Any]:
+async def get_sla_risk(limit: int = 20, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Open incidents with a real, already-computed SLA breach deadline
     (incident_engine's severity-based sla_breach_at), sorted soonest-breach-first."""
     now = datetime.now(timezone.utc)
-    q = {"sla_breach_at": {"$ne": None}, "is_sla_breached": False,
-         "status": {"$nin": ["resolved", "closed"]}}
+    q: Dict[str, Any] = {"sla_breach_at": {"$ne": None}, "is_sla_breached": False,
+                          "status": {"$nin": ["resolved", "closed"]}}
+    if tenant_id:
+        q["tenant_id"] = tenant_id
     rows = await db.incidents_engine.find(q, {"_id": 0}).sort("sla_breach_at", 1).limit(limit).to_list(limit)
 
     data = []
@@ -359,22 +384,38 @@ async def get_sla_risk(limit: int = 20) -> Dict[str, Any]:
             "summary": f"{len(data)} open incident(s) with an SLA deadline, {at_risk} breaching within 30 minutes"}
 
 
-async def get_ops_summary(days: int = 7) -> Dict[str, Any]:
+async def get_ops_summary(days: int = 7, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Composite ops health snapshot: incident volume/MTTR (db.incidents +
     db.incidents_engine) and real automation-outcome success rate
     (db.incident_outcomes, written by autonomous_ops_orchestrator.record_outcome) —
     mirrors how executive_routes.py composes the security executive dashboard, for
     operational health instead. Reports 'n/a' rather than fabricating a rate when no
-    outcomes have been recorded yet."""
+    outcomes have been recorded yet.
+
+    NOTE: db.incidents has historically inconsistent tenant_id tagging (see
+    get_incidents above) — filtered when tenant_id is set anyway, since that's still
+    strictly correct even if incomplete. db.incident_outcomes carries no tenant_id of
+    its own; when tenant_id is set, outcomes are scoped via the tenant-scoped
+    incidents_engine ids instead (same derived-ids pattern used for the SLA report's
+    monitor_results scoping)."""
     cutoff = _cutoff(days * 1440)
+    legacy_q: Dict[str, Any] = {"created_at": {"$gte": cutoff}}
+    engine_q: Dict[str, Any] = {"created_at": {"$gte": cutoff}}
+    if tenant_id:
+        legacy_q["tenant_id"] = tenant_id
+        engine_q["tenant_id"] = tenant_id
     legacy = await db.incidents.find(
-        {"created_at": {"$gte": cutoff}}, {"_id": 0, "mttr_seconds": 1, "status": 1}
+        legacy_q, {"_id": 0, "mttr_seconds": 1, "status": 1}
     ).to_list(2000)
     engine = await db.incidents_engine.find(
-        {"created_at": {"$gte": cutoff}}, {"_id": 0, "status": 1}
+        engine_q, {"_id": 0, "id": 1, "status": 1}
     ).to_list(2000)
+
+    outcomes_q: Dict[str, Any] = {"recorded_at": {"$gte": cutoff}}
+    if tenant_id:
+        outcomes_q["incident_id"] = {"$in": [e["id"] for e in engine if e.get("id")]}
     outcomes = await db.incident_outcomes.find(
-        {"recorded_at": {"$gte": cutoff}}, {"_id": 0, "was_effective": 1}
+        outcomes_q, {"_id": 0, "was_effective": 1}
     ).to_list(2000)
 
     mttr_values = [i["mttr_seconds"] for i in legacy if i.get("mttr_seconds")]
@@ -500,12 +541,27 @@ _ALLOWED_PARAMS = {
 }
 
 
-async def execute_tool(name: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Safely dispatch a tool call with parameter whitelisting."""
+_TENANT_SCOPED_TOOLS = {
+    "get_logs", "get_metrics", "get_deployments", "get_incidents", "get_security_events",
+    "get_ueba_profiles", "get_vulnerabilities", "get_compliance_status", "get_topology_summary",
+    "get_sla_risk", "get_ops_summary",
+}
+
+
+async def execute_tool(name: str, params: Optional[Dict[str, Any]] = None,
+                       tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """Safely dispatch a tool call with parameter whitelisting.
+
+    tenant_id comes ONLY from the authenticated caller (never from the LLM-controlled
+    `params` dict — _ALLOWED_PARAMS deliberately never whitelists it) and is injected
+    here, overriding anything of the same name a caller-supplied params dict might
+    contain, so a prompt can't spoof cross-tenant access."""
     fn = _TOOL_FUNCS.get(name)
     if fn is None:
         return {"tool": name, "error": f"unknown tool '{name}'", "data": [], "summary": "unknown tool"}
     clean = {k: v for k, v in (params or {}).items() if k in _ALLOWED_PARAMS[name] and v is not None}
+    if tenant_id and name in _TENANT_SCOPED_TOOLS:
+        clean["tenant_id"] = tenant_id
     try:
         return await fn(**clean)
     except Exception as e:

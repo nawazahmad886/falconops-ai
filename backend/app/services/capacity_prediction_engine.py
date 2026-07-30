@@ -58,7 +58,23 @@ class CapacityPredictionEngine:
         data = await db.metrics_timeseries.find(
             query, {"_id": 0, "value": 1, "timestamp": 1}
         ).sort("timestamp", 1).to_list(10000)
-        
+
+        return self._compute_prediction(metric_name, host, service, horizon, threshold, data)
+
+    def _compute_prediction(
+        self,
+        metric_name: str,
+        host: Optional[str],
+        service: Optional[str],
+        horizon: str,
+        threshold: float,
+        data: List[Dict],
+    ) -> Dict:
+        """Pure computation half of predict_capacity: given already-fetched
+        (timestamp, value) points for one metric+host, produce the prediction dict.
+        Split out so predict_all_hosts can fetch every host's data in a single grouped
+        query instead of one full 7-day scan per host (previously: N hosts x up to 3
+        metrics per get_capacity_alerts() call = up to 3N full collection scans)."""
         if len(data) < 10:
             return {
                 "metric_name": metric_name,
@@ -66,7 +82,7 @@ class CapacityPredictionEngine:
                 "message": "Not enough data points for prediction",
                 "data_points": len(data)
             }
-        
+
         # Extract values and timestamps
         timestamps = []
         values = []
@@ -284,35 +300,45 @@ class CapacityPredictionEngine:
         threshold: float = 90,
         tenant_id: Optional[str] = None
     ) -> List[Dict]:
-        """Predict capacity for all hosts with a specific metric"""
-        
-        # Get unique hosts
-        query = {"name": metric_name}
+        """Predict capacity for all hosts with a specific metric.
+
+        Single grouped 7-day query instead of one full collection scan per host: this
+        used to call predict_capacity() (a fresh find().to_list(10000)) once per host,
+        and get_capacity_alerts() calls this 3x (cpu/memory/disk) — with N hosts that
+        was up to 3N full unindexed scans per request."""
+        end_time = datetime.now(timezone.utc)
+        start_time = end_time - timedelta(days=7)
+
+        query = {
+            "name": metric_name,
+            "timestamp": {"$gte": start_time.isoformat(), "$lte": end_time.isoformat()}
+        }
         if tenant_id:
             query["tenant_id"] = tenant_id
-        
-        hosts = await db.metrics_timeseries.distinct("tags.host", query)
-        
+
+        docs = await db.metrics_timeseries.find(
+            query, {"_id": 0, "value": 1, "timestamp": 1, "tags.host": 1}
+        ).sort("timestamp", 1).to_list(100000)
+
+        by_host: Dict[str, List[Dict]] = {}
+        for d in docs:
+            h = (d.get("tags") or {}).get("host")
+            if h:
+                by_host.setdefault(h, []).append({"value": d["value"], "timestamp": d["timestamp"]})
+
         predictions = []
-        for host in hosts:
-            if host:
-                try:
-                    prediction = await self.predict_capacity(
-                        metric_name=metric_name,
-                        host=host,
-                        horizon=horizon,
-                        threshold=threshold,
-                        tenant_id=tenant_id
-                    )
-                    if prediction.get("status") == "success":
-                        predictions.append(prediction)
-                except Exception as e:
-                    print(f"Prediction error for {host}: {e}")
-        
+        for host, host_data in by_host.items():
+            try:
+                prediction = self._compute_prediction(metric_name, host, None, horizon, threshold, host_data)
+                if prediction.get("status") == "success":
+                    predictions.append(prediction)
+            except Exception as e:
+                print(f"Prediction error for {host}: {e}")
+
         # Sort by risk level
         risk_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
         predictions.sort(key=lambda x: risk_order.get(x.get("risk_assessment", {}).get("level", "info"), 4))
-        
+
         return predictions
     
     async def get_capacity_alerts(

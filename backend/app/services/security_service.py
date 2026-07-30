@@ -793,11 +793,14 @@ async def get_user_activity(hours: int = 24, limit: int = 50) -> Dict:
 
 async def get_security_events(
     hours: int = 24, category: str = None, severity: str = None,
-    action: str = None, search: str = None, limit: int = 100, offset: int = 0
+    action: str = None, search: str = None, limit: int = 100, offset: int = 0,
+    tenant_id: str = None
 ) -> Dict:
     """Get security events with filters"""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     query = {"timestamp": {"$gte": cutoff}}
+    if tenant_id:
+        query["tenant_id"] = tenant_id
 
     if category:
         query["category"] = category

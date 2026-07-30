@@ -81,6 +81,7 @@ from .executive_routes import router as executive_router
 from .agent_eval_routes import router as agent_eval_router
 from .ops_agents_routes import router as ops_agents_router
 from .network_flow_routes import router as network_flow_router
+from .agentic_workflow_routes import router as agentic_workflow_router
 
 # Export all routers
 all_routers = [
@@ -171,4 +172,5 @@ all_routers = [
     agent_eval_router,
     ops_agents_router,
     network_flow_router,
+    agentic_workflow_router,
 ]

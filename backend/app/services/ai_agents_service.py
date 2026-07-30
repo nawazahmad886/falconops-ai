@@ -46,6 +46,30 @@ class LLMProvider:
             logger.info("AI Agents: No LLM key found, using heuristic fallback")
 
     async def generate(self, system_prompt: str, user_prompt: str, session_id: str = None) -> str:
+        # Security fix: this LLM path previously never went through
+        # llm_provider_service.chat_completion() and so never got its pre-flight
+        # prompt-injection screen — a real gap, since run_agent()/run_crew() (the
+        # callers of generate()) are reachable from UNAUTHENTICATED SOC event
+        # ingestion (POST /api/soc-engine/ingest -> correlation ->
+        # trigger_from_rule() -> run_crew()). Reuses the exact same regex
+        # ai_monitoring_service/llm_provider_service already screen with, rather
+        # than maintaining a second denylist.
+        if os.environ.get("LLM_PREFLIGHT_INJECTION_BLOCK", "true").lower() not in ("false", "0", "no"):
+            try:
+                from .ai_monitoring_service import INJECTION_REGEX
+                if user_prompt and INJECTION_REGEX.search(user_prompt):
+                    logger.warning(
+                        "ai_agents_service.LLMProvider.generate: blocked a prompt-injection "
+                        "pattern match (session=%s)", session_id,
+                    )
+                    return (
+                        "I can't process that request — it matches a known prompt-injection "
+                        "pattern. If this was unintentional, please rephrase without phrases "
+                        "like 'ignore previous instructions' or attempts to reveal the system prompt."
+                    )
+            except Exception as e:
+                logger.debug("ai_agents_service pre-flight guard skipped: %s", e)
+
         if self.mode == "emergent":
             return await self._call_emergent(system_prompt, user_prompt, session_id)
         elif self.mode == "openai":

@@ -7,6 +7,7 @@ import time
 import platform
 import psutil
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 from fastapi import APIRouter, Depends
 from ..core.database import db
 from ..utils.auth import require_auth
@@ -174,8 +175,73 @@ async def _service_status() -> list:
     return results
 
 
+# Every asyncio.create_task(...) background scheduler started in main.py's lifespan,
+# keyed by the exact module-level global variable name main.py uses. Previously
+# self_monitor.py never checked any of these — it appended a single hardcoded
+# "monitor-check-cycle" entry with last_run=datetime.now() (computed at request
+# time, not a real heartbeat) and said nothing about the other 9 real background
+# tasks. A task that's still running (not done()) genuinely means its while-True
+# loop is alive; a task that IS done() without being cancelled means its loop
+# exited (crashed, or — like metrics_processor_task when Redis is down — returned
+# early) and is never coming back without a restart.
+_SCHEDULER_TASKS = [
+    ("metrics_processor_task", "Metrics Stream Processor", "continuous (Redis stream consumer)"),
+    ("kafka_consumer_task", "Event Bus Consumer", "continuous"),
+    ("sla_breach_task", "SLA-Breach Escalation Scheduler", "periodic"),
+    ("threat_intel_task", "Threat Intel Refresh Scheduler", "periodic"),
+    ("vuln_sync_task", "Vulnerability Sync Scheduler", "periodic"),
+    ("compliance_snapshot_task", "Compliance Snapshot Scheduler", "periodic"),
+    ("generic_ingestion_task", "Generic Ingestion Scheduler", "periodic"),
+    ("connector_poll_task", "Connector SDK Poll Scheduler", "every 60s"),
+    ("resource_bridge_task", "Resource Explorer Bridge/Sync Scheduler", "every 60s"),
+    ("runbook_schedule_task", "Runbook Schedule-Trigger Scheduler", "periodic"),
+]
+
+
+def _scheduler_task_statuses() -> list:
+    """Real liveness check via asyncio.Task.done()/cancelled()/exception() — no
+    fabricated timestamps. Lazily imports main.py (deferred past module-load time)
+    to avoid the circular import that would occur if this ran at import time:
+    main.py imports app.routes (which imports this module) before its own
+    scheduler-task globals are assigned."""
+    results = []
+    try:
+        import main as _main_module
+    except Exception as e:
+        return [{"id": "scheduler-check-error", "name": "Scheduler liveness check",
+                 "status": "unknown", "error": f"could not import main: {str(e)[:200]}"}]
+
+    for attr_name, label, cadence in _SCHEDULER_TASKS:
+        task = getattr(_main_module, attr_name, None)
+        if task is None:
+            results.append({"id": attr_name, "name": label, "frequency": cadence,
+                            "status": "not_started", "error": None})
+            continue
+        if not task.done():
+            results.append({"id": attr_name, "name": label, "frequency": cadence,
+                            "status": "active", "error": None})
+            continue
+        if task.cancelled():
+            results.append({"id": attr_name, "name": label, "frequency": cadence,
+                            "status": "stopped", "error": "cancelled (expected during shutdown)"})
+            continue
+        exc = task.exception()
+        if exc is not None:
+            results.append({"id": attr_name, "name": label, "frequency": cadence,
+                            "status": "crashed", "error": str(exc)[:300]})
+        else:
+            # Returned normally without being cancelled — every one of these
+            # scheduler coroutines is a `while True` loop, so this only happens
+            # when the loop exited early (e.g. process_stream() with no Redis).
+            results.append({"id": attr_name, "name": label, "frequency": cadence,
+                            "status": "stopped_unexpectedly",
+                            "error": "task completed without being cancelled — its loop exited early"})
+    return results
+
+
 async def _background_jobs() -> list:
-    """List active scheduled jobs from APScheduler."""
+    """Report schedules (real, DB-backed) + real liveness for every asyncio
+    scheduler task started at boot."""
     jobs = []
     try:
         schedules = await db.report_schedules.find(
@@ -193,15 +259,7 @@ async def _background_jobs() -> list:
     except Exception:
         pass
 
-    # Monitor check cycle (always running via APScheduler)
-    jobs.append({
-        "id": "monitor-check-cycle",
-        "name": "Monitor Check Cycle",
-        "frequency": "every 60s",
-        "last_run": datetime.now(timezone.utc).isoformat(),
-        "next_run": (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat(),
-        "status": "active",
-    })
+    jobs.extend(_scheduler_task_statuses())
     return jobs
 
 
@@ -217,7 +275,7 @@ async def _recent_api_errors() -> list:
         return []
 
 
-def _overall_status(mongo: dict, system: dict, services: list) -> str:
+def _overall_status(mongo: dict, system: dict, services: list, jobs: Optional[list] = None) -> str:
     """Determine overall platform health."""
     if mongo["status"] != "healthy":
         return "critical"
@@ -228,6 +286,10 @@ def _overall_status(mongo: dict, system: dict, services: list) -> str:
         return "critical"
     if degraded > 0:
         return "warning"
+    if jobs is not None:
+        crashed = sum(1 for j in jobs if j.get("status") in ("crashed", "stopped_unexpectedly"))
+        if crashed > 0:
+            return "critical"
     return "healthy"
 
 
@@ -255,7 +317,7 @@ async def get_platform_health(user: dict = Depends(require_auth)):
     services = await _service_status()
     jobs = await _background_jobs()
     errors = await _recent_api_errors()
-    status = _overall_status(mongo, system, services)
+    status = _overall_status(mongo, system, services, jobs)
 
     return {
         "status": status,

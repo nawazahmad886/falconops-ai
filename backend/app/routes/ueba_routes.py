@@ -22,7 +22,7 @@ async def user_profiles(
     current_user: Optional[dict] = Depends(get_current_user),
 ):
     """Get behavioral risk profiles for all users"""
-    return await build_user_profiles(hours)
+    return await build_user_profiles(hours, tenant_id=(current_user or {}).get("tenant_id"))
 
 
 @router.get("/summary")
@@ -41,7 +41,7 @@ async def insider_threats(
 ):
     """Get insider-threat candidates: users with high/critical UEBA risk who also
     touched privileged or data-sensitive actions."""
-    return await get_insider_threat_candidates(hours)
+    return await get_insider_threat_candidates(hours, tenant_id=(current_user or {}).get("tenant_id"))
 
 
 @router.get("/user/{username}")

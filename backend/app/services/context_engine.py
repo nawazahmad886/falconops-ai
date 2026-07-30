@@ -70,10 +70,15 @@ async def get_topology(service: str) -> Dict:
 
 
 async def get_runbook(alert: str) -> Optional[Dict]:
-    """Look up a runbook by alert name (case-insensitive). Returns {steps, links, owner}."""
+    """Look up an alert-name-keyed runbook hint (case-insensitive). Returns {steps, links, owner}.
+    Stored in db.alert_runbook_hints — a separate collection from db.runbooks (the
+    structured, uuid-keyed workflow-automation entity runbooks.py/runbook_engine.py
+    manage). The two used to share db.runbooks despite incompatible schemas
+    (this one has no id/name/service/steps-as-dicts), which crashed
+    GET /api/runbooks via Pydantic's RunbookResponse(**doc) construction."""
     if not alert:
         return None
-    doc = await db.runbooks.find_one(
+    doc = await db.alert_runbook_hints.find_one(
         {"$or": [
             {"alert_name": {"$regex": f"^{re.escape(alert)}$", "$options": "i"}},
             {"matches": {"$regex": re.escape(alert), "$options": "i"}},
@@ -157,5 +162,17 @@ async def upsert_runbook(alert_name: str, steps: List[str], links: Optional[List
         "matches": matches or [],
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    await db.runbooks.update_one({"alert_name": alert_name}, {"$set": doc}, upsert=True)
+    await db.alert_runbook_hints.update_one({"alert_name": alert_name}, {"$set": doc}, upsert=True)
     return doc
+
+
+async def migrate_alert_runbook_hints() -> Dict:
+    """One-time, idempotent: move alert-name-keyed runbook hint docs (see get_runbook/
+    upsert_runbook above) out of db.runbooks into their own db.alert_runbook_hints
+    collection. Safe to run on every boot."""
+    docs = await db.runbooks.find({"alert_name": {"$exists": True}}, {"_id": 0}).to_list(10000)
+    if not docs:
+        return {"migrated": 0}
+    await db.alert_runbook_hints.insert_many(docs)
+    await db.runbooks.delete_many({"alert_name": {"$exists": True}})
+    return {"migrated": len(docs)}

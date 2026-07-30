@@ -16,12 +16,16 @@ logger = logging.getLogger(__name__)
 
 # ======================== BEHAVIOR PROFILING ========================
 
-async def build_user_profiles(hours: int = 168) -> List[Dict]:
+async def build_user_profiles(hours: int = 168, tenant_id: Optional[str] = None) -> List[Dict]:
     """Build behavioral profiles for all users from security events (default 7 days)"""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
+    match_stage: Dict[str, Any] = {"timestamp": {"$gte": cutoff}, "user": {"$ne": "unknown"}}
+    if tenant_id:
+        match_stage["tenant_id"] = tenant_id
+
     pipeline = [
-        {"$match": {"timestamp": {"$gte": cutoff}, "user": {"$ne": "unknown"}}},
+        {"$match": match_stage},
         {"$group": {
             "_id": "$user",
             "total_events": {"$sum": 1},
@@ -178,12 +182,12 @@ async def get_user_behavior_timeline(user: str, hours: int = 168) -> Dict:
     }
 
 
-async def get_insider_threat_candidates(hours: int = 168) -> List[Dict]:
+async def get_insider_threat_candidates(hours: int = 168, tenant_id: Optional[str] = None) -> List[Dict]:
     """Explicit insider-threat framing on top of the already-real UEBA risk score:
     a user is a candidate when their behavioral risk is high/critical AND they've
     actually touched privileged or data-sensitive actions — pure re-labeling of
     build_user_profiles() output, no new data source, no fabricated signal."""
-    profiles = await build_user_profiles(hours)
+    profiles = await build_user_profiles(hours, tenant_id=tenant_id)
     candidates = []
     for p in profiles:
         if p["risk_level"] not in ("high", "critical"):

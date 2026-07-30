@@ -2,16 +2,21 @@
 FalconOps AI - Database Monitoring Routes
 API endpoints for DB metrics ingestion, instance management, query monitoring, and AI analysis
 """
+import secrets
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List
-from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi import APIRouter, HTTPException, Depends, Header, Query
 from pydantic import BaseModel
 
 from ..core.database import db
 from ..utils.auth import require_auth
 
 router = APIRouter(prefix="/api/db-monitoring", tags=["Database Monitoring"])
+
+
+def _tid(user: dict) -> Optional[str]:
+    return (user or {}).get("tenant_id")
 
 
 # ── Pydantic Models ──
@@ -80,13 +85,22 @@ class CustomQueryUpdate(BaseModel):
 @router.get("/instances")
 async def list_instances(user: dict = Depends(require_auth)):
     """List all registered database instances"""
-    instances = await db.db_instances.find({}, {"_id": 0}).to_list(length=100)
+    q: dict = {}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    instances = await db.db_instances.find(q, {"_id": 0, "api_key": 0}).to_list(length=100)
     return {"instances": instances}
 
 
 @router.post("/instances")
 async def register_instance(body: DBInstanceCreate, user: dict = Depends(require_auth)):
-    """Register a new database instance for monitoring"""
+    """Register a new database instance for monitoring. Generates an api_key the DB
+    agent must send back (via the X-API-Key header) on every /metrics/ingest call —
+    that endpoint has no user auth (the agent doesn't hold a JWT), so this key is the
+    only thing preventing an unauthenticated caller from injecting fake metrics into
+    any instance_id it can guess."""
+    api_key = secrets.token_urlsafe(32)
     instance = {
         "id": str(uuid.uuid4()),
         "name": body.name,
@@ -98,6 +112,8 @@ async def register_instance(body: DBInstanceCreate, user: dict = Depends(require
         "tags": body.tags,
         "status": "registered",
         "last_seen": None,
+        "api_key": api_key,
+        "tenant_id": user.get("tenant_id"),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "created_by": user.get("email", ""),
     }
@@ -112,17 +128,25 @@ async def update_instance(instance_id: str, body: DBInstanceUpdate, user: dict =
     update = {k: v for k, v in body.dict().items() if v is not None}
     if not update:
         raise HTTPException(status_code=400, detail="No fields to update")
-    result = await db.db_instances.update_one({"id": instance_id}, {"$set": update})
+    q = {"id": instance_id}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    result = await db.db_instances.update_one(q, {"$set": update})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Instance not found")
-    inst = await db.db_instances.find_one({"id": instance_id}, {"_id": 0})
+    inst = await db.db_instances.find_one({"id": instance_id}, {"_id": 0, "api_key": 0})
     return inst
 
 
 @router.delete("/instances/{instance_id}")
 async def delete_instance(instance_id: str, user: dict = Depends(require_auth)):
     """Delete a database instance"""
-    result = await db.db_instances.delete_one({"id": instance_id})
+    q = {"id": instance_id}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    result = await db.db_instances.delete_one(q)
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Instance not found")
     return {"deleted": True}
@@ -131,8 +155,19 @@ async def delete_instance(instance_id: str, user: dict = Depends(require_auth)):
 # ── Metrics Ingestion ──
 
 @router.post("/metrics/ingest")
-async def ingest_metrics(body: DBMetricsIngest):
-    """Ingest database metrics from the DB agent"""
+async def ingest_metrics(body: DBMetricsIngest, x_api_key: Optional[str] = Header(None)):
+    """Ingest database metrics from the DB agent. Previously had no authentication at
+    all — any caller who could guess/enumerate an instance_id could inject fake
+    metrics/slow-queries/locks into that instance's dashboard and trigger fake
+    alert-rule firings. Now requires the api_key generated at instance registration
+    (sent back as X-API-Key), the same key the install script already embeds in the
+    agent's config."""
+    instance = await db.db_instances.find_one({"id": body.instance_id}, {"_id": 0})
+    if not instance:
+        raise HTTPException(status_code=404, detail="Instance not found")
+    if not x_api_key or x_api_key != instance.get("api_key"):
+        raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key")
+
     ts = body.timestamp or datetime.now(timezone.utc).isoformat()
 
     # Update instance last_seen
@@ -181,8 +216,7 @@ async def ingest_metrics(body: DBMetricsIngest):
     # Evaluate health rules against DB metrics
     try:
         from ..services.health_rule_evaluator import evaluate_rules_for_db
-        inst = await db.db_instances.find_one({"id": body.instance_id}, {"_id": 0})
-        inst_name = inst.get("name", "") if inst else ""
+        inst_name = instance.get("name", "")
         db_metrics = {**body.metrics, "slow_query_count": len(body.slow_queries)}
         await evaluate_rules_for_db(body.instance_id, inst_name, db_metrics)
     except Exception as e:
@@ -209,7 +243,11 @@ async def get_dashboard(
     """Get dashboard data for a specific database instance"""
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
 
-    instance = await db.db_instances.find_one({"id": instance_id}, {"_id": 0})
+    inst_q = {"id": instance_id}
+    tid = _tid(user)
+    if tid:
+        inst_q["tenant_id"] = tid
+    instance = await db.db_instances.find_one(inst_q, {"_id": 0, "api_key": 0})
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
@@ -257,7 +295,11 @@ async def get_dashboard(
 @router.get("/dashboard-overview")
 async def get_overview(user: dict = Depends(require_auth)):
     """Get overview of all monitored databases"""
-    instances = await db.db_instances.find({}, {"_id": 0}).to_list(length=100)
+    q: dict = {}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    instances = await db.db_instances.find(q, {"_id": 0, "api_key": 0}).to_list(length=100)
 
     since = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
@@ -769,7 +811,11 @@ async def ai_analyze_db(instance_id: str, user: dict = Depends(require_auth)):
     if not key:
         raise HTTPException(status_code=500, detail="AI key not configured")
 
-    instance = await db.db_instances.find_one({"id": instance_id}, {"_id": 0})
+    inst_q = {"id": instance_id}
+    tid = _tid(user)
+    if tid:
+        inst_q["tenant_id"] = tid
+    instance = await db.db_instances.find_one(inst_q, {"_id": 0, "api_key": 0})
     if not instance:
         raise HTTPException(status_code=404, detail="Instance not found")
 
