@@ -13,12 +13,6 @@ const SOURCES = [
     { value: 'soc_event', label: 'SOC Event' },
     { value: 'soc_incident', label: 'SOC Incident' },
 ];
-const RANGES = [
-    { value: '1', label: 'Last hour' },
-    { value: '6', label: 'Last 6 hours' },
-    { value: '24', label: 'Last 24 hours' },
-    { value: '168', label: 'Last 7 days' },
-];
 
 export default function ProblemsFilterPanel({ filters, onChange, onReset }) {
     const set = (patch) => onChange({ ...filters, ...patch });
@@ -67,18 +61,6 @@ export default function ProblemsFilterPanel({ filters, onChange, onReset }) {
                     <SelectContent>
                         <SelectItem value="all">All sources</SelectItem>
                         {SOURCES.map((s) => <SelectItem key={s.value} value={s.value}>{s.label}</SelectItem>)}
-                    </SelectContent>
-                </Select>
-            </div>
-
-            <div className="space-y-1.5">
-                <label className="text-[11px] text-white/50">Time range</label>
-                <Select value={filters.rangeHours || '24'} onValueChange={(v) => set({ rangeHours: v })}>
-                    <SelectTrigger className="h-8 text-xs bg-black/40 border-white/10" data-testid="filter-range">
-                        <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                        {RANGES.map((r) => <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>)}
                     </SelectContent>
                 </Select>
             </div>

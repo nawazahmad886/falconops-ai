@@ -43,12 +43,12 @@ import {
     Globe,
     Zap,
     BarChart3,
-    Filter,
-    Calendar,
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, PieChart, Pie, Cell } from 'recharts';
 import { motion } from 'framer-motion';
-import { GlobalTimestampHeader, TIME_FILTERS, formatTimestamp, formatRelativeTime, getTimeFilterHours } from '../components/TimeFilter';
+import { formatRelativeTime } from '../components/TimeFilter';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 const statusColors = {
     online: 'bg-green-500/20 text-green-400 border-green-500/30',
@@ -76,13 +76,9 @@ export const ServerMonitoringPage = () => {
     const [showDetailsDialog, setShowDetailsDialog] = useState(false);
     const [showRulesDialog, setShowRulesDialog] = useState(false);
     const [alertRules, setAlertRules] = useState([]);
-    
-    // Time filter state
-    const [timeFilter, setTimeFilter] = useState('24h');
-    const [customStartDate, setCustomStartDate] = useState('');
-    const [customEndDate, setCustomEndDate] = useState('');
-    const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
-    
+
+    const { hours } = useTimeRangeParams();
+
     // New rule state
     const [newRule, setNewRule] = useState({
         name: '',
@@ -113,16 +109,20 @@ export const ServerMonitoringPage = () => {
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 15000); // Refresh every 15s
-        return () => clearInterval(interval);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    useAutoRefresh(fetchData);
+
+    // Fetches once when the details dialog opens, using whatever the global
+    // time range is at that moment — does not reactively refetch if the
+    // global range changes while the dialog stays open (bigger UX change,
+    // left for a future pass).
     const handleViewDetails = async (server) => {
         setSelectedServer(server);
         setShowDetailsDialog(true);
         try {
-            const hours = getTimeFilterHours(timeFilter);
-            const res = await api.get(`/servers/${server.id}/metrics?hours=${Math.ceil(hours)}`);
+            const res = await api.get(`/servers/${server.id}/metrics?hours=${hours}`);
             setServerMetrics(res.data);
         } catch (error) {
             toast.error('Failed to load server metrics');
@@ -223,18 +223,6 @@ export const ServerMonitoringPage = () => {
     return (
         <>
             <div className="space-y-6" data-testid="server-monitoring-page">
-                {/* Global Timestamp Header */}
-                <GlobalTimestampHeader
-                    timeFilter={timeFilter}
-                    setTimeFilter={setTimeFilter}
-                    customStartDate={customStartDate}
-                    setCustomStartDate={setCustomStartDate}
-                    customEndDate={customEndDate}
-                    setCustomEndDate={setCustomEndDate}
-                    showCustomDatePicker={showCustomDatePicker}
-                    setShowCustomDatePicker={setShowCustomDatePicker}
-                />
-
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div>
@@ -697,7 +685,7 @@ export const ServerMonitoringPage = () => {
                                 <div>
                                     <h4 className="font-heading text-sm font-bold uppercase tracking-wider text-white mb-3 flex items-center gap-2">
                                         <TrendingUp className="w-4 h-4 text-cyan-400" />
-                                        Resource History ({TIME_FILTERS.find(f => f.value === timeFilter)?.label})
+                                        Resource History (last {hours}h)
                                     </h4>
                                     {serverMetrics.length > 0 ? (
                                         <div className="h-[200px]">

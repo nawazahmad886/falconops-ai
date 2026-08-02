@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Button } from '../components/ui/button';
@@ -91,8 +93,8 @@ export const LogsPage = () => {
     const [searchTerm, setSearchTerm] = useState('');
     const [severityFilter, setSeverityFilter] = useState('');
     const [serviceFilter, setServiceFilter] = useState('');
-    const [timeRange, setTimeRange] = useState('1');
-    
+    const { hours } = useTimeRangeParams();
+
     // Copilot state
     const [copilotOpen, setCopilotOpen] = useState(false);
     const [copilotMessages, setCopilotMessages] = useState([]);
@@ -108,18 +110,18 @@ export const LogsPage = () => {
         setLoading(true);
         try {
             const params = new URLSearchParams();
-            params.append('hours', timeRange);
+            params.append('hours', hours);
             params.append('limit', '200');
             if (severityFilter) params.append('severity', severityFilter);
             if (serviceFilter) params.append('service', serviceFilter);
             if (searchTerm) params.append('search', searchTerm);
-            
+
             const [logsRes, statsRes, servicesRes] = await Promise.all([
                 api.get(`/logs?${params.toString()}`),
-                api.get(`/logs/statistics?hours=${timeRange}`),
-                api.get(`/logs/services?hours=${timeRange}`),
+                api.get(`/logs/statistics?hours=${hours}`),
+                api.get(`/logs/services?hours=${hours}`),
             ]);
-            
+
             setLogs(logsRes.data.logs || []);
             setTotalLogs(logsRes.data.total || 0);
             setStatistics(statsRes.data);
@@ -130,29 +132,31 @@ export const LogsPage = () => {
         } finally {
             setLoading(false);
         }
-    }, [api, timeRange, severityFilter, serviceFilter, searchTerm]);
+    }, [api, hours, severityFilter, serviceFilter, searchTerm]);
 
     const fetchAnomalies = useCallback(async () => {
         try {
-            const res = await api.get(`/logs/anomalies?hours=${timeRange}`);
+            const res = await api.get(`/logs/anomalies?hours=${hours}`);
             setAnomalies(res.data.anomalies || []);
         } catch (error) {
             console.error('Failed to fetch anomalies:', error);
         }
-    }, [api, timeRange]);
+    }, [api, hours]);
 
     const fetchCorrelations = useCallback(async () => {
         try {
-            const res = await api.post(`/logs/correlate?hours=${timeRange}&time_window=5`);
+            const res = await api.post(`/logs/correlate?hours=${hours}&time_window=5`);
             setCorrelations(res.data.events || []);
         } catch (error) {
             console.error('Failed to fetch correlations:', error);
         }
-    }, [api, timeRange]);
+    }, [api, hours]);
 
     useEffect(() => {
         fetchData();
     }, [fetchData]);
+
+    useAutoRefresh(fetchData);
 
     useEffect(() => {
         if (activeTab === 'anomalies') {
@@ -180,7 +184,7 @@ export const LogsPage = () => {
         setAnalyzing(true);
         try {
             const params = new URLSearchParams();
-            params.append('hours', timeRange);
+            params.append('hours', hours);
             if (serviceFilter) params.append('service', serviceFilter);
             
             const res = await api.post(`/logs/analyze?${params.toString()}`);
@@ -374,17 +378,6 @@ export const LogsPage = () => {
                                     {services.map((s) => (
                                         <SelectItem key={s.service} value={s.service}>{s.service}</SelectItem>
                                     ))}
-                                </SelectContent>
-                            </Select>
-                            <Select value={timeRange} onValueChange={setTimeRange}>
-                                <SelectTrigger className="w-[120px] bg-white/5 border-white/10">
-                                    <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                    <SelectItem value="1">Last 1 hour</SelectItem>
-                                    <SelectItem value="6">Last 6 hours</SelectItem>
-                                    <SelectItem value="24">Last 24 hours</SelectItem>
-                                    <SelectItem value="72">Last 3 days</SelectItem>
                                 </SelectContent>
                             </Select>
                         </div>

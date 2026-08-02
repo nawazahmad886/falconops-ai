@@ -12,6 +12,7 @@ import ProblemsTimelineChart from '../components/problems/ProblemsTimelineChart'
 import ProblemsFilterPanel from '../components/problems/ProblemsFilterPanel';
 import ProblemsGrid from '../components/problems/ProblemsGrid';
 import ProblemDetailPanel from '../components/problems/ProblemDetailPanel';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
 
 const API = process.env.REACT_APP_BACKEND_URL;
 const authHeaders = () => ({
@@ -21,9 +22,9 @@ const authHeaders = () => ({
 
 const RECONNECT_BASE_MS = 2_000;
 const RECONNECT_MAX_MS = 30_000;
-const DEFAULT_FILTERS = { rangeHours: '24' };
+const DEFAULT_FILTERS = {};
 
-function buildQuery(filters) {
+function buildQuery(filters, startTime) {
     const params = new URLSearchParams();
     if (filters.status) params.set('status', filters.status);
     if (filters.severity) params.set('severity', filters.severity);
@@ -31,16 +32,14 @@ function buildQuery(filters) {
     if (filters.service) params.set('service', filters.service);
     if (filters.assignedToMe) params.set('assigned_to', 'me');
     if (filters.includeSuppressed) params.set('include_suppressed', 'true');
-    if (filters.rangeHours) {
-        const hours = Number(filters.rangeHours);
-        params.set('start_time', new Date(Date.now() - hours * 3600_000).toISOString());
-    }
+    if (startTime) params.set('start_time', startTime);
     params.set('limit', '200');
     return params.toString();
 }
 
 export default function ProblemsPage() {
     const [filters, setFilters] = useState(DEFAULT_FILTERS);
+    const { hours, startTime } = useTimeRangeParams();
     const [problems, setProblems] = useState([]);
     const [stats, setStats] = useState(null);
     const [timeline, setTimeline] = useState([]);
@@ -59,8 +58,7 @@ export default function ProblemsPage() {
     const fetchAll = useCallback(async () => {
         setLoading(true);
         try {
-            const qs = buildQuery(filters);
-            const hours = Number(filters.rangeHours || '24');
+            const qs = buildQuery(filters, startTime);
             const [listRes, statsRes, timelineRes] = await Promise.all([
                 fetch(`${API}/api/problems?${qs}`, { headers: authHeaders() }),
                 fetch(`${API}/api/problems/statistics`, { headers: authHeaders() }),
@@ -76,9 +74,13 @@ export default function ProblemsPage() {
         } finally {
             setLoading(false);
         }
-    }, [filters]);
+    }, [filters, hours, startTime]);
 
     useEffect(() => { fetchAll(); }, [fetchAll]);
+
+    // No useAutoRefresh here — the WebSocket live feed below already pushes
+    // updates on every problem.* event; polling on top would be redundant
+    // load and cause list re-sort flicker.
 
     // Live feed — capped exponential-backoff reconnect (same pattern as
     // LiveCallFlowPage.js); on any problem.* event, just refetch rather than
@@ -186,7 +188,7 @@ export default function ProblemsPage() {
 
     const exportCsv = async () => {
         try {
-            const qs = buildQuery(filters);
+            const qs = buildQuery(filters, startTime);
             const r = await fetch(`${API}/api/problems/export?${qs}`, { method: 'POST', headers: authHeaders() });
             if (!r.ok) throw new Error(await r.text());
             const blob = await r.blob();

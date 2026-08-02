@@ -18,14 +18,13 @@ import {
     Brain,
     Shield,
     Target,
-    Filter,
-    Calendar,
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Area, AreaChart } from 'recharts';
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { LiveAlertFeed } from '../components/LiveAlertFeed';
-import { GlobalTimestampHeader, TIME_FILTERS, getTimeFilterHours } from '../components/TimeFilter';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 const severityColors = {
     critical: 'bg-red-500/20 text-red-400 border-red-500/30',
@@ -54,16 +53,12 @@ export const DashboardPage = () => {
     const [incidents, setIncidents] = useState([]);
     const [services, setServices] = useState([]);
     const [loading, setLoading] = useState(true);
-    
-    // Time filter state
-    const [timeFilter, setTimeFilter] = useState('24h');
-    const [customStartDate, setCustomStartDate] = useState('');
-    const [customEndDate, setCustomEndDate] = useState('');
-    const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
+
+    const { hours } = useTimeRangeParams();
 
     const fetchData = async () => {
         try {
-            const days = Math.ceil(getTimeFilterHours(timeFilter) / 24) || 7;
+            const days = Math.ceil(hours / 24) || 7;
             const [analyticsRes, alertsRes, incidentsRes, servicesRes] = await Promise.all([
                 api.get(`/analytics/dashboard?days=${days}`),
                 api.get('/alerts?limit=5'),
@@ -84,9 +79,10 @@ export const DashboardPage = () => {
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 30000);
-        return () => clearInterval(interval);
-    }, [timeFilter]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [hours]);
+
+    useAutoRefresh(fetchData);
 
     const formatMTTR = (seconds) => {
         if (!seconds) return '--';
@@ -147,18 +143,6 @@ export const DashboardPage = () => {
     return (
         <>
             <div className="space-y-6" data-testid="dashboard-page">
-                {/* Global Timestamp Header */}
-                <GlobalTimestampHeader
-                    timeFilter={timeFilter}
-                    setTimeFilter={setTimeFilter}
-                    customStartDate={customStartDate}
-                    setCustomStartDate={setCustomStartDate}
-                    customEndDate={customEndDate}
-                    setCustomEndDate={setCustomEndDate}
-                    showCustomDatePicker={showCustomDatePicker}
-                    setShowCustomDatePicker={setShowCustomDatePicker}
-                />
-                
                 {/* Header */}
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div>

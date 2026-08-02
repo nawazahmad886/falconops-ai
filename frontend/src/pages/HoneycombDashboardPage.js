@@ -46,7 +46,6 @@ import {
     XCircle,
     Activity,
     Eye,
-    Filter,
     Maximize2,
     Minimize2,
     Zap,
@@ -66,14 +65,14 @@ import {
     ChevronRight,
     X,
     Info,
-    Calendar,
     Edit,
     Trash2,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LineChart as RechartsLine, Line, ResponsiveContainer, AreaChart, Area, Tooltip } from 'recharts';
 import { TracerouteVisualizer } from '../components/TracerouteVisualizer';
-import { GlobalTimestampHeader, TIME_FILTERS, formatTimestamp, formatRelativeTime, getTimeFilterHours } from '../components/TimeFilter';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 // Calculate health score from uptime and latency
 const calculateHealthScore = (monitor) => {
@@ -626,13 +625,9 @@ export const HoneycombDashboardPage = () => {
     const [showAddDialog, setShowAddDialog] = useState(false);
     const [showTraceroute, setShowTraceroute] = useState(false);
     const [traceMonitor, setTraceMonitor] = useState(null);
-    
-    // Time filter state
-    const [timeFilter, setTimeFilter] = useState('24h');
-    const [customStartDate, setCustomStartDate] = useState('');
-    const [customEndDate, setCustomEndDate] = useState('');
-    const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
-    
+
+    const { hours } = useTimeRangeParams();
+
     // Edit monitor state
     const [showEditDialog, setShowEditDialog] = useState(false);
     const [editMonitor, setEditMonitor] = useState(null);
@@ -656,8 +651,8 @@ export const HoneycombDashboardPage = () => {
             setSchedulerRunning(schedulerRes.data.monitoring_scheduler_running);
 
             // Fetch results for each monitor
-            const resultsPromises = monitorsRes.data.map(m => 
-                api.get(`/monitors/${m.id}/results?hours=${getTimeFilterHours(timeFilter)}&limit=50`).then(res => ({ id: m.id, results: res.data })).catch(() => ({ id: m.id, results: [] }))
+            const resultsPromises = monitorsRes.data.map(m =>
+                api.get(`/monitors/${m.id}/results?hours=${hours}&limit=50`).then(res => ({ id: m.id, results: res.data })).catch(() => ({ id: m.id, results: [] }))
             );
             const resultsData = await Promise.all(resultsPromises);
             const resultsMap = {};
@@ -669,13 +664,13 @@ export const HoneycombDashboardPage = () => {
         } finally {
             setLoading(false);
         }
-    }, [api, timeFilter]);
+    }, [api, hours]);
 
     useEffect(() => {
         fetchData();
-        const interval = setInterval(fetchData, 30000);
-        return () => clearInterval(interval);
     }, [fetchData]);
+
+    useAutoRefresh(fetchData);
 
     const handleSelectMonitor = async (monitor) => {
         setSelectedMonitor(monitor);
@@ -767,18 +762,6 @@ export const HoneycombDashboardPage = () => {
 
     const content = (
         <div className={`space-y-6 ${fullscreen ? 'p-6' : ''}`} data-testid="honeycomb-dashboard">
-            {/* Global Timestamp Header */}
-            <GlobalTimestampHeader
-                timeFilter={timeFilter}
-                setTimeFilter={setTimeFilter}
-                customStartDate={customStartDate}
-                setCustomStartDate={setCustomStartDate}
-                customEndDate={customEndDate}
-                setCustomEndDate={setCustomEndDate}
-                showCustomDatePicker={showCustomDatePicker}
-                setShowCustomDatePicker={setShowCustomDatePicker}
-            />
-            
             {/* Header */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
                 <div>

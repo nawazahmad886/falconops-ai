@@ -16,17 +16,9 @@ import {
     BarChart2, PieChart, ArrowUpRight, ArrowDownRight, Minus
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
-
-// Time range presets
-const TIME_RANGES = [
-    { label: 'Last 15 min', value: '15m', hours: 0.25 },
-    { label: 'Last 1 hour', value: '1h', hours: 1 },
-    { label: 'Last 6 hours', value: '6h', hours: 6 },
-    { label: 'Last 24 hours', value: '24h', hours: 24 },
-    { label: 'Last 7 days', value: '7d', hours: 168 },
-];
 
 // Aggregation options
 const AGGREGATIONS = [
@@ -56,7 +48,7 @@ const MetricsExplorerPage = () => {
     
     // Query state
     const [selectedMetric, setSelectedMetric] = useState('');
-    const [timeRange, setTimeRange] = useState('1h');
+    const { hours, startTime } = useTimeRangeParams();
     const [aggregation, setAggregation] = useState('avg');
     const [bucket, setBucket] = useState('5m');
     const [hostFilter, setHostFilter] = useState('');
@@ -132,9 +124,6 @@ const MetricsExplorerPage = () => {
         setError(null);
         
         try {
-            const range = TIME_RANGES.find(r => r.value === timeRange);
-            const startTime = new Date(Date.now() - range.hours * 60 * 60 * 1000).toISOString();
-            
             let url = `${API_URL}/api/metrics/v2/query?metric_name=${encodeURIComponent(selectedMetric)}&start_time=${startTime}&aggregation=${aggregation}&bucket=${bucket}`;
             
             if (hostFilter) url += `&host=${encodeURIComponent(hostFilter)}`;
@@ -156,7 +145,7 @@ const MetricsExplorerPage = () => {
         } finally {
             setLoading(false);
         }
-    }, [selectedMetric, timeRange, aggregation, bucket, hostFilter, serviceFilter, getAuthHeaders]);
+    }, [selectedMetric, startTime, aggregation, bucket, hostFilter, serviceFilter, getAuthHeaders]);
     
     // Fetch top metrics
     const fetchTopMetrics = async (metricName) => {
@@ -204,7 +193,7 @@ const MetricsExplorerPage = () => {
     // Format timestamp for chart
     const formatChartTime = (timestamp) => {
         const date = new Date(timestamp);
-        if (timeRange === '7d') {
+        if (hours > 24) {
             return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
         }
         return date.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -439,16 +428,10 @@ const MetricsExplorerPage = () => {
                                 </div>
                                 <div>
                                     <label className="text-sm text-white/60 mb-1 block">Time Range</label>
-                                    <Select value={timeRange} onValueChange={setTimeRange}>
-                                        <SelectTrigger className="bg-white/5 border-white/10 text-white">
-                                            <SelectValue />
-                                        </SelectTrigger>
-                                        <SelectContent>
-                                            {TIME_RANGES.map(r => (
-                                                <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
-                                            ))}
-                                        </SelectContent>
-                                    </Select>
+                                    <div className="h-10 flex items-center px-3 bg-white/5 border border-white/10 rounded-md text-white/70 text-sm" data-testid="active-time-range">
+                                        <Clock className="w-3.5 h-3.5 mr-2 text-white/40" />
+                                        Last {hours}h <span className="text-white/30 ml-1 text-xs">(header)</span>
+                                    </div>
                                 </div>
                                 <div>
                                     <label className="text-sm text-white/60 mb-1 block">Aggregation</label>

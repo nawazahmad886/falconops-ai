@@ -1,6 +1,8 @@
-import React, { useState, useEffect, createContext, useContext } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useGlobalFilters } from '../context/GlobalFiltersContext';
+import { useTheme } from '../context/ThemeContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Badge } from '../components/ui/badge';
@@ -97,6 +99,8 @@ import {
     Cloud,
     BrainCircuit,
     MemoryStick,
+    Sun,
+    Moon,
 } from 'lucide-react';
 
 const API_URL = process.env.REACT_APP_BACKEND_URL;
@@ -324,11 +328,25 @@ const ENVIRONMENTS = [
     { value: 'development', label: 'Development', color: 'text-emerald-400' },
 ];
 
-// ======================== GLOBAL CONTEXT ========================
+// Timezone options — 'browser' and 'UTC' cover the two cases every display
+// formatter needs; any other IANA zone name works too (Intl.DateTimeFormat
+// takes an arbitrary zone string), these are just the pinned shortcuts.
+const TIMEZONES = [
+    { value: 'browser', label: 'Browser Time' },
+    { value: 'UTC', label: 'UTC' },
+    { value: 'Asia/Riyadh', label: 'Saudi Time' },
+];
 
-const GlobalContext = createContext(null);
-
-export const useGlobalContext = () => useContext(GlobalContext);
+// Auto-refresh interval options, in ms. 'off' disables polling entirely.
+const REFRESH_INTERVALS = [
+    { value: 'off', label: 'Off' },
+    { value: '10000', label: '10s' },
+    { value: '30000', label: '30s' },
+    { value: '60000', label: '1m' },
+    { value: '300000', label: '5m' },
+    { value: '900000', label: '15m' },
+    { value: '1800000', label: '30m' },
+];
 
 // ======================== GLOBAL SEARCH ========================
 
@@ -666,17 +684,23 @@ const AICopilotPanel = ({ open, onOpenChange }) => {
 
 export const EnterpriseLayout = ({ children }) => {
     const { user, logout, api } = useAuth();
+    const {
+        timeRange, setTimeRange,
+        environment, setEnvironment,
+        customRange, setCustomRange,
+        timezone, setTimezone,
+        refreshInterval, setRefreshInterval,
+    } = useGlobalFilters();
+    const { theme, toggleTheme } = useTheme();
     const location = useLocation();
     const navigate = useNavigate();
-    
+
     // State
     const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
     const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
     const [searchOpen, setSearchOpen] = useState(false);
     const [copilotOpen, setCopilotOpen] = useState(false);
     const [notificationsOpen, setNotificationsOpen] = useState(false);
-    const [timeRange, setTimeRange] = useState('1h');
-    const [environment, setEnvironment] = useState('all');
     const [notifications, setNotifications] = useState([]);
     
     // Determine active module based on path
@@ -730,15 +754,7 @@ export const EnterpriseLayout = ({ children }) => {
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []);
 
-    const globalContextValue = {
-        timeRange,
-        setTimeRange,
-        environment,
-        setEnvironment,
-    };
-
     return (
-        <GlobalContext.Provider value={globalContextValue}>
             <div className="min-h-screen bg-[#0B0E14] flex flex-col">
                 {/* ==================== TOP BAR ==================== */}
                 <header className="sticky top-0 z-50 bg-[#0B0E14]/95 backdrop-blur-xl border-b border-white/5">
@@ -796,6 +812,35 @@ export const EnterpriseLayout = ({ children }) => {
                                 </SelectContent>
                             </Select>
 
+                            {/* Timezone */}
+                            <Select value={timezone} onValueChange={setTimezone}>
+                                <SelectTrigger className="w-[110px] h-8 bg-white/5 border-white/10 text-xs hidden xl:flex" data-testid="timezone-select">
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className="bg-[#0D1117] border-white/10">
+                                    {TIMEZONES.map(t => (
+                                        <SelectItem key={t.value} value={t.value} className="text-xs">
+                                            {t.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+
+                            {/* Auto-refresh interval */}
+                            <Select value={refreshInterval} onValueChange={setRefreshInterval}>
+                                <SelectTrigger className="w-[90px] h-8 bg-white/5 border-white/10 text-xs hidden xl:flex" data-testid="refresh-interval-select">
+                                    <RefreshCw className="w-3 h-3 mr-1 text-white/50" />
+                                    <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent className="bg-[#0D1117] border-white/10">
+                                    {REFRESH_INTERVALS.map(r => (
+                                        <SelectItem key={r.value} value={r.value} className="text-xs">
+                                            {r.label}
+                                        </SelectItem>
+                                    ))}
+                                </SelectContent>
+                            </Select>
+
                             {/* Notifications */}
                             <NotificationsPanel 
                                 open={notificationsOpen} 
@@ -803,10 +848,25 @@ export const EnterpriseLayout = ({ children }) => {
                                 notifications={notifications}
                             />
 
+                            {/* Theme toggle — infrastructure only, see ThemeContext.js. Real
+                                visible effect is currently limited to a handful of shadcn
+                                primitives (card/dialog/dropdown/popover); most of the app is
+                                still hardcoded dark literals and won't visibly change yet. */}
+                            <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={toggleTheme}
+                                className="hover:bg-white/5 hidden md:flex"
+                                title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                                data-testid="theme-toggle"
+                            >
+                                {theme === 'dark' ? <Sun className="w-5 h-5 text-white/70" /> : <Moon className="w-5 h-5 text-white/70" />}
+                            </Button>
+
                             {/* AI Copilot */}
-                            <Button 
-                                variant="ghost" 
-                                size="icon" 
+                            <Button
+                                variant="ghost"
+                                size="icon"
                                 onClick={() => setCopilotOpen(true)}
                                 className="hover:bg-white/5"
                                 title="AI Copilot"
@@ -825,10 +885,19 @@ export const EnterpriseLayout = ({ children }) => {
                                 <Monitor className="w-5 h-5 text-white/70" />
                             </Button>
 
-                            {/* Live Indicator */}
-                            <div className="hidden lg:flex items-center gap-1.5 px-2 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded text-[10px] text-emerald-400">
-                                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
-                                LIVE
+                            {/* Auto-refresh status — reflects the actual refreshInterval setting
+                                above, not a page-level "data is fresh" claim (the header itself
+                                fetches nothing; only pages that call useAutoRefresh() honor this). */}
+                            <div
+                                className={`hidden lg:flex items-center gap-1.5 px-2 py-1 rounded text-[10px] border ${
+                                    refreshInterval !== 'off'
+                                        ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                                        : 'bg-white/5 border-white/10 text-white/40'
+                                }`}
+                                data-testid="refresh-status-indicator"
+                            >
+                                <div className={`w-1.5 h-1.5 rounded-full ${refreshInterval !== 'off' ? 'bg-emerald-400 animate-pulse' : 'bg-white/30'}`} />
+                                {refreshInterval !== 'off' ? 'LIVE' : 'PAUSED'}
                             </div>
 
                             {/* User Menu */}
@@ -898,6 +967,33 @@ export const EnterpriseLayout = ({ children }) => {
                             );
                         })}
                     </div>
+
+                    {/* ==================== CUSTOM RANGE BAR ====================
+                        Shown only when Time Range is set to "Custom". datetime-local
+                        inputs are always browser-local wall-clock time — the Timezone
+                        selector above only affects how returned timestamps are
+                        DISPLAYED, it does not reinterpret this input. */}
+                    {timeRange === 'custom' && (
+                        <div className="flex items-center gap-2 px-4 py-1.5 border-t border-white/5 bg-[#0B0E14]/80 text-xs" data-testid="custom-range-bar">
+                            <Calendar className="w-3.5 h-3.5 text-white/50" />
+                            <span className="text-white/40">Custom range (browser-local time):</span>
+                            <Input
+                                type="datetime-local"
+                                value={customRange.start}
+                                onChange={(e) => setCustomRange((r) => ({ ...r, start: e.target.value }))}
+                                className="h-7 w-[190px] bg-white/5 border-white/10 text-xs"
+                                data-testid="custom-range-start"
+                            />
+                            <span className="text-white/40">to</span>
+                            <Input
+                                type="datetime-local"
+                                value={customRange.end}
+                                onChange={(e) => setCustomRange((r) => ({ ...r, end: e.target.value }))}
+                                className="h-7 w-[190px] bg-white/5 border-white/10 text-xs"
+                                data-testid="custom-range-end"
+                            />
+                        </div>
+                    )}
                 </header>
 
                 {/* ==================== MAIN CONTENT AREA ==================== */}
@@ -1012,7 +1108,6 @@ export const EnterpriseLayout = ({ children }) => {
                 <GlobalSearch open={searchOpen} onOpenChange={setSearchOpen} />
                 <AICopilotPanel open={copilotOpen} onOpenChange={setCopilotOpen} />
             </div>
-        </GlobalContext.Provider>
     );
 };
 

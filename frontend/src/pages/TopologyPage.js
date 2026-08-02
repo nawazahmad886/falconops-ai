@@ -38,12 +38,11 @@ import {
     Search,
     Sparkles,
     Clock,
-    Filter,
-    Calendar,
     Edit,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { GlobalTimestampHeader, TIME_FILTERS, formatTimestamp, formatRelativeTime, getTimeFilterHours } from '../components/TimeFilter';
+import { useGlobalFilters } from '../context/GlobalFiltersContext';
+import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
 // Health color utilities
 const getHealthColor = (score) => {
@@ -208,6 +207,7 @@ const TopologyEdge = ({ edge, sourcePos, targetPos, scale }) => {
 // Main Topology Page Component
 export const TopologyPage = () => {
     const { api, canWrite } = useAuth();
+    const { environment } = useGlobalFilters();
     const [topology, setTopology] = useState(null);
     const [loading, setLoading] = useState(true);
     const [selectedNode, setSelectedNode] = useState(null);
@@ -216,19 +216,15 @@ export const TopologyPage = () => {
     const [newDependency, setNewDependency] = useState({ source: '', target: '', type: 'depends_on' });
     const svgRef = useRef(null);
     const [viewBox] = useState({ x: 0, y: 0, width: 1000, height: 600 });
-    
-    // Time filter state
-    const [timeFilter, setTimeFilter] = useState('24h');
-    const [customStartDate, setCustomStartDate] = useState('');
-    const [customEndDate, setCustomEndDate] = useState('');
-    const [showCustomDatePicker, setShowCustomDatePicker] = useState(false);
-    const [showNodeDetails, setShowNodeDetails] = useState(false);
-    const [nodeResults, setNodeResults] = useState([]);
-    
+
+    // fetchTopology returns current-state snapshot data (live health/status),
+    // not a historical window — it was never time-scoped and stays that way.
+    // The global environment filter IS real here (GET /api/topology already
+    // supports it server-side) and was previously never sent.
     const fetchTopology = useCallback(async () => {
         try {
             const [topoRes, monitorsRes] = await Promise.all([
-                api.get('/topology'),
+                api.get(`/topology${environment !== 'all' ? `?environment=${environment}` : ''}`),
                 api.get('/monitors')
             ]);
             setTopology(topoRes.data);
@@ -238,13 +234,14 @@ export const TopologyPage = () => {
         } finally {
             setLoading(false);
         }
-    }, [api]);
-    
+    }, [api, environment]);
+
     useEffect(() => {
+        setLoading(true);
         fetchTopology();
-        const interval = setInterval(fetchTopology, 30000); // Refresh every 30s
-        return () => clearInterval(interval);
     }, [fetchTopology]);
+
+    useAutoRefresh(fetchTopology);
     
     // Calculate node positions in a force-directed layout
     const nodePositions = React.useMemo(() => {
@@ -328,18 +325,6 @@ export const TopologyPage = () => {
     return (
         <>
             <div className="space-y-6" data-testid="topology-page">
-                {/* Global Timestamp Header */}
-                <GlobalTimestampHeader
-                    timeFilter={timeFilter}
-                    setTimeFilter={setTimeFilter}
-                    customStartDate={customStartDate}
-                    setCustomStartDate={setCustomStartDate}
-                    customEndDate={customEndDate}
-                    setCustomEndDate={setCustomEndDate}
-                    showCustomDatePicker={showCustomDatePicker}
-                    setShowCustomDatePicker={setShowCustomDatePicker}
-                />
-                
                 {/* Header */}
                 <div className="flex items-center justify-between">
                     <div>

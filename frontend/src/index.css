@@ -58,6 +58,24 @@
         --status-warning: #FFB300;
         --status-critical: #D32F2F;
     }
+
+    /* Light theme override (see ThemeContext.js) — dark above is the default
+       (no class on <html>) so this block cannot change anyone's current
+       appearance unless they explicitly opt in via the theme toggle.
+       Only neutral surface/text tokens flip; brand/accent/semantic/chart
+       colors stay identical across both themes. */
+    html.light {
+        --background: 0 0% 100%;
+        --foreground: 220 20% 10%;
+        --card: 0 0% 100%;
+        --card-foreground: 220 20% 10%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 220 20% 10%;
+        --muted: 220 15% 94%;
+        --muted-foreground: 220 10% 40%;
+        --border: 220 15% 88%;
+        --input: 220 15% 88%;
+    }
 }
 
 @layer base {

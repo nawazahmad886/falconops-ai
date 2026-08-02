@@ -3,6 +3,8 @@ import { BrowserRouter, Routes, Route, Navigate, useLocation } from 'react-route
 import { Toaster } from './components/ui/sonner';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { LanguageProvider } from './context/LanguageContext';
+import { GlobalFiltersProvider } from './context/GlobalFiltersContext';
+import { ThemeProvider } from './context/ThemeContext';
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
@@ -866,21 +868,25 @@ const AppRoutes = () => {
 function App() {
     return (
         <BrowserRouter>
-            <LanguageProvider>
-                <AuthProvider>
-                    <AppRoutes />
-                    <Toaster 
-                        position="top-right" 
-                        toastOptions={{
-                            style: {
-                                background: 'hsl(0 0% 4%)',
-                                border: '1px solid hsl(0 0% 15%)',
-                                color: 'hsl(0 0% 98%)',
-                            },
-                        }}
-                    />
-                </AuthProvider>
-            </LanguageProvider>
+            <ThemeProvider>
+                <LanguageProvider>
+                    <AuthProvider>
+                        <GlobalFiltersProvider>
+                            <AppRoutes />
+                        </GlobalFiltersProvider>
+                        <Toaster
+                            position="top-right"
+                            toastOptions={{
+                                style: {
+                                    background: 'hsl(0 0% 4%)',
+                                    border: '1px solid hsl(0 0% 15%)',
+                                    color: 'hsl(0 0% 98%)',
+                                },
+                            }}
+                        />
+                    </AuthProvider>
+                </LanguageProvider>
+            </ThemeProvider>
         </BrowserRouter>
     );
 }
