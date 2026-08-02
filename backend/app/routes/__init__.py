@@ -83,6 +83,9 @@ from .ops_agents_routes import router as ops_agents_router
 from .network_flow_routes import router as network_flow_router
 from .agentic_workflow_routes import router as agentic_workflow_router
 from .knowledge_graph_routes import router as knowledge_graph_router
+from .rased_routes import router as rased_router
+from .rased_incident_routes import router as rased_incident_router
+from .rased_demo_routes import router as rased_demo_router
 
 # Export all routers
 all_routers = [
@@ -175,4 +178,7 @@ all_routers = [
     network_flow_router,
     agentic_workflow_router,
     knowledge_graph_router,
+    rased_router,
+    rased_incident_router,
+    rased_demo_router,
 ]

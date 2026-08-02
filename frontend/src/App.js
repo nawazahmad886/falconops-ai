@@ -8,6 +8,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { LandingPage } from './pages/LandingPage';
 import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
+import { RasedPage } from './pages/RasedPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { IncidentsPage } from './pages/IncidentsPage';
 import { RunbooksPage } from './pages/RunbooksPage';
@@ -210,16 +211,24 @@ const AppRoutes = () => {
                     </ProtectedRoute>
                 } 
             />
-            <Route 
-                path="/alerts" 
+            <Route
+                path="/alerts"
                 element={
                     <ProtectedRoute>
                         <AlertsPage />
                     </ProtectedRoute>
-                } 
+                }
             />
-            <Route 
-                path="/incidents" 
+            <Route
+                path="/rased"
+                element={
+                    <ProtectedRoute>
+                        <RasedPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/incidents"
                 element={
                     <ProtectedRoute>
                         <IncidentsPage />
