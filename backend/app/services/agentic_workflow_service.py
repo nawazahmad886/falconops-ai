@@ -28,11 +28,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..core.database import db
+from . import agentic_trace_service
 from . import intelligence_agents_service
 from . import rag_service
 from .capacity_prediction_engine import capacity_prediction_engine
@@ -139,18 +141,48 @@ Rules:
 - Do not present any single hypothesis as certain — this is a ranked list of possibilities, not a verdict."""
 
 
-async def run_diagnoser(service_or_incident: str, hours: int = 24, user: Optional[Dict] = None) -> Dict[str, Any]:
+async def run_diagnoser(
+    service_or_incident: str, hours: int = 24, user: Optional[Dict] = None, run_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """New: reuses intelligence_agents_service's evidence-gathering + citation
     plumbing, then adds one new LLM synthesis call (via the central
     llm_provider_service.chat_completion — not a new/duplicate LLM path) prompted
     in the same proven ranked-hypothesis shape trace_rca_service.analyze_window()
-    already uses for traces, applied here to an incident/service."""
+    already uses for traces, applied here to an incident/service.
+
+    run_id: pass the Supervisor's run_id when called from handle_query() so
+    the classify -> route -> gather -> rank -> done events land on one shared
+    trace; omit it (a fresh run_id is generated) when calling this directly,
+    e.g. from the synchronous GET /diagnose/{target} route."""
+    if run_id is None:
+        run_id = await agentic_trace_service.start_run()
+    run_started = time.perf_counter()
+
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "start", f"Diagnoser started for {service_or_incident}", status="running",
+    )
+
+    t0 = time.perf_counter()
     evidence_doc = await intelligence_agents_service.incident_analysis(
         query=f"Diagnose the root cause of {service_or_incident}",
         service=service_or_incident, time_range_minutes=hours * 60, user=user,
     )
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "gather_evidence", "Gathered observability evidence",
+        detail={
+            "evidence_count": len(evidence_doc.get("evidence") or []),
+            "single_answer_confidence": evidence_doc.get("confidence"),
+        },
+        duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+
+    t0 = time.perf_counter()
     similar = await rag_service.find_similar_incidents(
         f"root cause of {service_or_incident}", top_k=3, service=service_or_incident,
+    )
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "search_memory", f"Searched incident memory — {len(similar)} similar past incident(s)",
+        detail={"count": len(similar)}, duration_ms=int((time.perf_counter() - t0) * 1000),
     )
 
     evidence_block = json.dumps({
@@ -166,6 +198,10 @@ async def run_diagnoser(service_or_incident: str, hours: int = 24, user: Optiona
         {"role": "system", "content": DIAGNOSER_SYSTEM_PROMPT},
         {"role": "user", "content": f"Evidence gathered for {service_or_incident}:\n{evidence_block}"},
     ]
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "llm_rank", "Ranking competing hypotheses via LLM", status="running",
+    )
+    t0 = time.perf_counter()
     llm = await chat_completion(messages, session_id=f"diagnoser-{uuid.uuid4().hex[:8]}")
     parsed = _parse_json_block(llm.get("response", "")) or {}
     hypotheses_raw = parsed.get("hypotheses") or []
@@ -198,14 +234,30 @@ async def run_diagnoser(service_or_incident: str, hours: int = 24, user: Optiona
             "category": "infra", "evidence": evidence_doc.get("evidence") or [],
         }]
 
-    return {
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "llm_rank", f"Ranked {len(hypotheses)} hypothesis/hypotheses",
+        detail={"provider": llm.get("provider"), "model": llm.get("model"), "hypothesis_count": len(hypotheses)},
+        duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+
+    result = {
         "target": service_or_incident,
         "hypotheses": hypotheses,
         "similar_past_incidents": similar,
         "llm_provider": llm.get("provider"),
         "llm_model": llm.get("model"),
         "queried_at": datetime.now(timezone.utc).isoformat(),
+        "run_id": run_id,
     }
+
+    top = hypotheses[0]["root_cause"][:80] if hypotheses else "none"
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "done", f"Diagnoser complete — top hypothesis: {top}",
+        detail={"top_confidence": hypotheses[0]["confidence"] if hypotheses else None},
+        duration_ms=int((time.perf_counter() - run_started) * 1000),
+    )
+
+    return result
 
 
 def _parse_json_block(text: str) -> Optional[Dict[str, Any]]:
@@ -243,17 +295,38 @@ async def _log_decision(*, query: str, incident_id: Optional[str], classificatio
     return doc["id"]
 
 
-async def handle_query(query: str, incident_id: Optional[str] = None, user: Optional[Dict] = None) -> Dict[str, Any]:
+async def handle_query(
+    query: str, incident_id: Optional[str] = None, user: Optional[Dict] = None, run_id: Optional[str] = None,
+) -> Dict[str, Any]:
     """Supervisor entry point: classify -> route -> log. Read-only end to end —
     logging happens on completion (not before), since a read has no side effect
     to guard against; contrast the action broker's write-before-execute rule,
-    which exists precisely because that path has real side effects."""
+    which exists precisely because that path has real side effects.
+
+    run_id is threaded into whichever specialist gets routed to (currently
+    only run_diagnoser() accepts one) so a query that routes to the Diagnoser
+    shows as one continuous Supervisor -> Diagnoser trace, not two disjoint
+    runs."""
+    if run_id is None:
+        run_id = await agentic_trace_service.start_run()
+    run_started = time.perf_counter()
+
+    await agentic_trace_service.emit(
+        run_id, "supervisor", "received", f"Supervisor received query: {query[:100]}", status="running",
+    )
+
+    t0 = time.perf_counter()
     classification = classify_query(query, incident_id=incident_id)
     route = classification["route"]
+    await agentic_trace_service.emit(
+        run_id, "supervisor", "classify", f"Classified as '{route}' — {classification['reason']}",
+        detail=classification, duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+    await agentic_trace_service.emit(run_id, "supervisor", "route", f"Routing to {route}", status="running")
 
     if route == "diagnoser":
         target = incident_id or _extract_service_name(query) or query
-        result = await run_diagnoser(target, user=user)
+        result = await run_diagnoser(target, user=user, run_id=run_id)
         confidence = result["hypotheses"][0]["confidence"] if result["hypotheses"] else None
         summary = result["hypotheses"][0]["root_cause"] if result["hypotheses"] else "No hypothesis produced"
         evidence_refs = result["hypotheses"]
@@ -288,11 +361,17 @@ async def handle_query(query: str, incident_id: Optional[str] = None, user: Opti
         confidence=confidence, evidence_refs=evidence_refs, output_summary=summary,
     )
 
+    await agentic_trace_service.emit(
+        run_id, "supervisor", "done", f"Supervisor complete — routed to {route}",
+        detail={"decision_id": decision_id}, duration_ms=int((time.perf_counter() - run_started) * 1000),
+    )
+
     return {
         "classification": classification,
         "routed_to": route,
         "result": result,
         "decision_id": decision_id,
+        "run_id": run_id,
     }
 
 

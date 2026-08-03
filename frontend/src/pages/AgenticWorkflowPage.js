@@ -1,13 +1,15 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import { Badge } from '../components/ui/badge';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { toast } from 'sonner';
+import { motion, AnimatePresence } from 'framer-motion';
 import {
     Sparkles, Send, RefreshCw, ArrowRight, Network, TrendingUp, Search,
-    ScrollText, ShieldCheck, ExternalLink, ChevronRight,
+    ScrollText, ShieldCheck, ExternalLink, ChevronRight, Zap, Database,
+    Brain, CheckCircle2, XCircle, Play,
 } from 'lucide-react';
 import { AgenticWorkflowLogoFull } from '../components/AgenticWorkflowLogo';
 
@@ -32,6 +34,218 @@ const COLOR_CLS = {
     rose: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
     emerald: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30',
 };
+
+const DIAGNOSER_PIPELINE_STAGES = [
+    { agent: 'diagnoser', stage: 'start', label: 'Diagnoser Started', icon: Zap },
+    { agent: 'diagnoser', stage: 'gather_evidence', label: 'Gather Evidence', icon: Search },
+    { agent: 'diagnoser', stage: 'search_memory', label: 'Search Incident Memory', icon: Database },
+    { agent: 'diagnoser', stage: 'llm_rank', label: 'Rank Hypotheses (LLM)', icon: Brain },
+    { agent: 'diagnoser', stage: 'done', label: 'Complete', icon: CheckCircle2 },
+];
+
+function stageStatus(events, agent, stage) {
+    const matches = events.filter((e) => e.agent === agent && e.stage === stage);
+    if (matches.length === 0) return { status: 'pending', event: null };
+    const latest = matches[matches.length - 1];
+    const status = latest.status === 'running' ? 'running' : latest.status === 'error' ? 'error' : 'done';
+    return { status, event: latest };
+}
+
+function PipelineNode({ def, statusInfo, isLast }) {
+    const Icon = def.icon;
+    const { status, event } = statusInfo;
+    const ringCls = {
+        pending: 'border-white/15 text-white/30 bg-black/30',
+        running: 'border-cyan-400 text-cyan-300 bg-cyan-500/10 animate-pulse',
+        done: 'border-emerald-500/50 text-emerald-300 bg-emerald-500/10',
+        error: 'border-red-500/50 text-red-300 bg-red-500/10',
+    }[status];
+
+    return (
+        <div className="flex items-center flex-1 min-w-0">
+            <div className="flex flex-col items-center gap-1.5 shrink-0">
+                <div className={`w-11 h-11 rounded-full border-2 flex items-center justify-center ${ringCls}`}>
+                    {status === 'done' ? <CheckCircle2 className="w-5 h-5" /> : status === 'error' ? <XCircle className="w-5 h-5" /> : <Icon className="w-4 h-4" />}
+                </div>
+                <span className={`text-[10px] text-center max-w-[86px] ${status === 'pending' ? 'text-white/30' : 'text-white/70'}`}>{def.label}</span>
+                {event?.duration_ms !== undefined && event?.duration_ms !== null && (
+                    <span className="text-[9px] text-white/35 tabular-nums">{event.duration_ms}ms</span>
+                )}
+            </div>
+            {!isLast && <div className={`h-0.5 flex-1 mx-1 ${status === 'done' ? 'bg-emerald-500/40' : 'bg-white/10'}`} />}
+        </div>
+    );
+}
+
+function LiveDiagnoserPipeline() {
+    const [target, setTarget] = useState('');
+    const [running, setRunning] = useState(false);
+    const [runId, setRunId] = useState(null);
+    const [events, setEvents] = useState([]);
+    const [finalRun, setFinalRun] = useState(null);
+    const abortRef = useRef(null);
+
+    useEffect(() => () => abortRef.current?.abort(), []);
+
+    const streamTrace = async (run_id) => {
+        const controller = new AbortController();
+        abortRef.current = controller;
+        try {
+            const token = localStorage.getItem('falconToken');
+            const response = await fetch(`${API}/api/agentic-workflow/trace/${run_id}/stream`, {
+                headers: { Authorization: `Bearer ${token}` },
+                signal: controller.signal,
+            });
+            if (!response.ok || !response.body) throw new Error('stream unavailable');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let eventName = 'message';
+
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+                const chunks = buffer.split('\n\n');
+                buffer = chunks.pop() || '';
+                for (const chunk of chunks) {
+                    let data = null;
+                    for (const line of chunk.split('\n')) {
+                        if (line.startsWith('event:')) eventName = line.slice(6).trim();
+                        if (line.startsWith('data:')) data = line.slice(5).trim();
+                    }
+                    if (!data) continue;
+                    try {
+                        const payload = JSON.parse(data);
+                        if (eventName === 'trace') {
+                            setEvents((prev) => [...prev, payload]);
+                        } else if (eventName === 'final') {
+                            setFinalRun(payload);
+                        }
+                    } catch (_e) { /* keepalive/non-JSON, ignore */ }
+                }
+            }
+        } catch (e) {
+            if (e.name !== 'AbortError') toast.error('Trace stream disconnected');
+        } finally {
+            setRunning(false);
+        }
+    };
+
+    const start = async () => {
+        if (!target.trim() || running) return;
+        setRunning(true);
+        setEvents([]);
+        setFinalRun(null);
+        try {
+            const r = await fetch(`${API}/api/agentic-workflow/diagnose/trigger`, {
+                method: 'POST', headers: authHeaders(),
+                body: JSON.stringify({ service_or_incident: target, hours: 24 }),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const { run_id } = await r.json();
+            setRunId(run_id);
+            streamTrace(run_id);
+        } catch (e) {
+            toast.error(`Failed to start diagnoser: ${e.message?.slice(0, 200)}`);
+            setRunning(false);
+        }
+    };
+
+    const errored = finalRun?.status === 'error' || events.some((e) => e.status === 'error');
+    const hypotheses = finalRun?.result?.hypotheses || [];
+
+    return (
+        <Card className="bg-black/40 border-cyan-500/20" data-testid="live-diagnoser-pipeline">
+            <CardHeader className="pb-3 border-b border-white/5">
+                <CardTitle className="text-base flex items-center gap-2 text-white">
+                    <Play className="w-4 h-4 text-cyan-400" /> Live Agent Pipeline — Diagnoser
+                </CardTitle>
+                <p className="text-[12px] text-white/50">
+                    Watch the Diagnoser run in real time — every stage below is a real, timestamped step from the
+                    actual execution, not a scripted animation.
+                </p>
+            </CardHeader>
+            <CardContent className="p-4 space-y-4">
+                <div className="flex gap-2">
+                    <Input
+                        value={target}
+                        onChange={(e) => setTarget(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && start()}
+                        placeholder="service name or incident id"
+                        className="bg-black/40 border-white/10 text-white"
+                        disabled={running}
+                        data-testid="live-pipeline-input"
+                    />
+                    <Button onClick={start} disabled={running || !target.trim()} className="bg-cyan-600 hover:bg-cyan-700" data-testid="live-pipeline-run">
+                        {running ? <RefreshCw className="w-4 h-4 animate-spin" /> : (<><Play className="w-4 h-4 mr-1.5" /> Run Live</>)}
+                    </Button>
+                </div>
+
+                {runId && (
+                    <>
+                        <div className="flex items-center py-2 overflow-x-auto">
+                            {DIAGNOSER_PIPELINE_STAGES.map((def, i) => (
+                                <PipelineNode
+                                    key={def.stage}
+                                    def={def}
+                                    statusInfo={stageStatus(events, def.agent, def.stage)}
+                                    isLast={i === DIAGNOSER_PIPELINE_STAGES.length - 1}
+                                />
+                            ))}
+                        </div>
+
+                        {errored && (
+                            <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded p-2">
+                                {finalRun?.error || 'The run failed — see the trace log below for the last successful step.'}
+                            </div>
+                        )}
+
+                        <div className="bg-black/30 border border-white/10 rounded-lg max-h-56 overflow-y-auto p-2 space-y-1.5">
+                            <AnimatePresence initial={false}>
+                                {events.map((ev) => (
+                                    <motion.div
+                                        key={ev.seq}
+                                        initial={{ opacity: 0, y: 6 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        className="flex items-center gap-2 text-[11px]"
+                                    >
+                                        <span className="text-white/30 font-mono w-16 shrink-0">{ev.agent}</span>
+                                        <span className="text-white/70 flex-1 truncate">{ev.title}</span>
+                                        {ev.duration_ms != null && <span className="text-white/35 tabular-nums shrink-0">{ev.duration_ms}ms</span>}
+                                    </motion.div>
+                                ))}
+                            </AnimatePresence>
+                            {events.length === 0 && <div className="text-[11px] text-white/30 p-1">Waiting for the first step…</div>}
+                        </div>
+
+                        {hypotheses.length > 0 && (
+                            <div className="space-y-2">
+                                <p className="text-[11px] text-white/40 uppercase tracking-wide">Result — Ranked Hypotheses</p>
+                                {hypotheses.map((h) => (
+                                    <div key={h.rank} className="bg-black/30 border border-white/10 rounded-lg p-3">
+                                        <div className="flex items-center gap-2 mb-1">
+                                            <Badge className="text-[10px] bg-violet-500/15 text-violet-300 border border-violet-500/30">#{h.rank}</Badge>
+                                            <span className="text-sm text-white/90 flex-1">{h.root_cause}</span>
+                                            <span className="text-[11px] text-white/50 tabular-nums">{Math.round(h.confidence * 100)}%</span>
+                                        </div>
+                                        {h.evidence?.length > 0 && (
+                                            <ul className="pl-1 space-y-0.5">
+                                                {h.evidence.slice(0, 3).map((e, i) => <li key={i} className="text-[11px] text-white/50">• {e}</li>)}
+                                            </ul>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </>
+                )}
+            </CardContent>
+        </Card>
+    );
+}
 
 function AskAnything() {
     const [query, setQuery] = useState('');
@@ -373,6 +587,7 @@ export default function AgenticWorkflowPage() {
                 </p>
             </div>
 
+            <LiveDiagnoserPipeline />
             <AskAnything />
             <DiagnoserCard />
             <QuickLookups />
