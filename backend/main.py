@@ -89,6 +89,9 @@ connector_poll_task = None
 # Background task for the Resource Explorer's bridge/sync scheduler
 resource_bridge_task = None
 
+# Background task for the Control Center's job watchdog (auto-restart)
+job_watchdog_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -98,6 +101,7 @@ async def lifespan(app: FastAPI):
     global runbook_schedule_task
     global connector_poll_task
     global resource_bridge_task
+    global job_watchdog_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -220,8 +224,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Runbook schedule scheduler init warning: {e}")
 
+    # Control Center: job watchdog — auto-restarts any of the above asyncio_task
+    # background jobs if it crashes or stops unexpectedly while this process is
+    # still up (whole-process crashes are already handled by docker-compose's
+    # restart: unless-stopped). Bounded retries — see job_control.py's docstring.
+    try:
+        from app.services.control_center.job_control import watchdog_loop
+        job_watchdog_task = asyncio.create_task(watchdog_loop())
+        logger.info("Control Center job watchdog started")
+    except Exception as e:
+        logger.warning(f"Job watchdog init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
-    
+
     # Start uptime monitor scheduler
     start_uptime_scheduler()
 
@@ -280,6 +295,14 @@ async def lifespan(app: FastAPI):
         runbook_schedule_task.cancel()
         try:
             await runbook_schedule_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop the Control Center job watchdog
+    if job_watchdog_task:
+        job_watchdog_task.cancel()
+        try:
+            await job_watchdog_task
         except asyncio.CancelledError:
             pass
 

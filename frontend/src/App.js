@@ -85,6 +85,7 @@ import ProblemsPage from './pages/ProblemsPage';
 import ResourceExplorerPage from './pages/ResourceExplorerPage';
 import ResourceDetailPage from './pages/ResourceDetailPage';
 import AgenticWorkflowPage from './pages/AgenticWorkflowPage';
+import ControlCenterPage from './pages/ControlCenterPage';
 import ServiceDetailPage from './pages/ServiceDetailPage';
 import APMQuickstartPage from './pages/APMQuickstartPage';
 import PricingPage from './pages/PricingPage';
@@ -768,6 +769,14 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <AgenticWorkflowPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/control-center"
+                element={
+                    <ProtectedRoute>
+                        <ControlCenterPage />
                     </ProtectedRoute>
                 }
             />

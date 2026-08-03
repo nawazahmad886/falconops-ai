@@ -138,25 +138,30 @@ def _process_info() -> dict:
     }
 
 
+# Hoisted from _service_status()'s former local variable, unchanged, so
+# control_center/platform_overview.py can reuse the exact same list (with a
+# richer status classification) instead of maintaining a second copy that
+# could drift out of sync with this one.
+SERVICE_HEALTH_TARGETS = [
+    ("Monitoring Engine", "monitors", "Periodic URL/port checks"),
+    ("Alert Engine", "alerts", "Alert processing pipeline"),
+    ("Incident Engine", "incidents", "Incident correlation"),
+    ("Health Rules", "health_rules", "Threshold-based alerting"),
+    ("Synthetic Monitoring", "db.synthetic_monitors", "URL & login flow checks"),
+    ("Database Monitoring", "db_instances", "DB agent metrics"),
+    ("Server Monitoring", "servers", "Infrastructure agents"),
+    ("Metrics Pipeline", "metrics_timeseries", "Time-series ingestion"),
+    ("Anomaly Detection", "anomaly_results", "ML-based detection"),
+    ("Capacity Prediction", "capacity_predictions", "Resource forecasting"),
+    ("Report Scheduler", "report_schedules", "Scheduled PDF/Excel reports"),
+    ("Licensing", "license_records", "License management"),
+]
+
+
 async def _service_status() -> list:
     """Check availability of each internal service/module."""
-    services = [
-        ("Monitoring Engine", "monitors", "Periodic URL/port checks"),
-        ("Alert Engine", "alerts", "Alert processing pipeline"),
-        ("Incident Engine", "incidents", "Incident correlation"),
-        ("Health Rules", "health_rules", "Threshold-based alerting"),
-        ("Synthetic Monitoring", "db.synthetic_monitors", "URL & login flow checks"),
-        ("Database Monitoring", "db_instances", "DB agent metrics"),
-        ("Server Monitoring", "servers", "Infrastructure agents"),
-        ("Metrics Pipeline", "metrics_timeseries", "Time-series ingestion"),
-        ("Anomaly Detection", "anomaly_results", "ML-based detection"),
-        ("Capacity Prediction", "capacity_predictions", "Resource forecasting"),
-        ("Report Scheduler", "report_schedules", "Scheduled PDF/Excel reports"),
-        ("Licensing", "license_records", "License management"),
-    ]
-
     results = []
-    for name, collection, desc in services:
+    for name, collection, desc in SERVICE_HEALTH_TARGETS:
         try:
             count = await db[collection].estimated_document_count()
             results.append({

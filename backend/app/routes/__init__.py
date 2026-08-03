@@ -86,6 +86,7 @@ from .knowledge_graph_routes import router as knowledge_graph_router
 from .rased_routes import router as rased_router
 from .rased_incident_routes import router as rased_incident_router
 from .rased_demo_routes import router as rased_demo_router
+from .control_center_routes import router as control_center_router
 
 # Export all routers
 all_routers = [
@@ -181,4 +182,5 @@ all_routers = [
     rased_router,
     rased_incident_router,
     rased_demo_router,
+    control_center_router,
 ]

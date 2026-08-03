@@ -139,6 +139,7 @@ const MODULES = {
             { path: '/custom-dashboard', label: 'My Dashboard (Builder)', icon: Layers },
             { path: '/noc-dashboard', label: 'NOC Dashboard', icon: Eye },
             { path: '/self-monitoring', label: 'Platform Health', icon: Activity },
+            { path: '/control-center', label: 'Control Center', icon: Cpu },
             { path: '/alert-respond', label: 'Alert & Respond', icon: Shield },
             { path: '/alert-engine', label: 'Alert Engine', icon: Bell },
             { path: '/incident-engine', label: 'Incidents', icon: AlertTriangle },
@@ -397,6 +398,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         { type: 'page', label: 'Capacity Prediction', path: '/capacity-prediction', icon: TrendingUp },
         { type: 'page', label: 'Synthetic Monitoring', path: '/synthetic-monitoring', icon: Globe },
         { type: 'page', label: 'Platform Health', path: '/self-monitoring', icon: Activity },
+        { type: 'page', label: 'Control Center', path: '/control-center', icon: Cpu },
         { type: 'page', label: 'Security Monitoring', path: '/security-monitoring', icon: Shield },
         { type: 'page', label: 'Behavior Analytics (UEBA)', path: '/ueba', icon: Eye },
         { type: 'page', label: 'Attack Simulator', path: '/attack-simulator', icon: Target },
@@ -709,7 +711,7 @@ export const EnterpriseLayout = ({ children }) => {
         if (path.startsWith('/problems')) return 'problems';
         if (path.startsWith('/resources')) return 'resources';
         if (path.startsWith('/agentic-workflow')) return 'agentic_workflow';
-        if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
+        if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/control-center', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';
         if (path.startsWith('/ai-observability') || path.startsWith('/ask-falconops')) return 'ai_observability';

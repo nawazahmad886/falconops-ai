@@ -36,12 +36,25 @@ const COLOR_CLS = {
 };
 
 const DIAGNOSER_PIPELINE_STAGES = [
-    { agent: 'diagnoser', stage: 'start', label: 'Diagnoser Started', icon: Zap },
+    { agent: 'diagnoser', stage: 'start', label: 'Diagnoser', icon: Zap },
     { agent: 'diagnoser', stage: 'gather_evidence', label: 'Gather Evidence', icon: Search },
-    { agent: 'diagnoser', stage: 'search_memory', label: 'Search Incident Memory', icon: Database },
-    { agent: 'diagnoser', stage: 'llm_rank', label: 'Rank Hypotheses (LLM)', icon: Brain },
+    { agent: 'diagnoser', stage: 'search_memory', label: 'Search Memory', icon: Database },
+    { agent: 'diagnoser', stage: 'llm_rank', label: 'Propose Hypotheses', icon: Brain },
+    { agent: 'diagnoser', stage: 'validate', label: 'Judge — Validate', icon: ShieldCheck },
     { agent: 'diagnoser', stage: 'done', label: 'Complete', icon: CheckCircle2 },
 ];
+
+// Real tool calls incident_analysis() makes in parallel (see
+// agentic_workflow_service.py's tool_trace fan-out emit) — not fabricated
+// sub-agents, just friendlier labels for what actually ran.
+const TOOL_LABELS = {
+    get_logs: 'Logs',
+    get_metrics: 'Metrics',
+    get_traces: 'Traces',
+    get_deployments: 'Deploys',
+    get_incidents: 'Incidents',
+    get_agent_status: 'Agent Health',
+};
 
 function stageStatus(events, agent, stage) {
     const matches = events.filter((e) => e.agent === agent && e.stage === stage);
@@ -73,6 +86,34 @@ function PipelineNode({ def, statusInfo, isLast }) {
                 )}
             </div>
             {!isLast && <div className={`h-0.5 flex-1 mx-1 ${status === 'done' ? 'bg-emerald-500/40' : 'bg-white/10'}`} />}
+        </div>
+    );
+}
+
+function ToolFanOut({ events }) {
+    // Every distinct `agent === "tool"` event seen so far, in arrival order —
+    // this is the real parallel fan-out inside incident_analysis(), surfaced
+    // as it actually reports in, not a fixed pre-drawn list.
+    const toolEvents = events.filter((e) => e.agent === 'tool');
+    if (toolEvents.length === 0) return null;
+
+    return (
+        <div className="relative pl-6 -mt-1 mb-1">
+            <div className="absolute left-2 top-0 bottom-3 w-px bg-cyan-500/20" />
+            <div className="flex flex-wrap gap-1.5">
+                {toolEvents.map((ev) => (
+                    <motion.div
+                        key={ev.stage}
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        className="flex items-center gap-1 text-[10px] bg-cyan-500/10 border border-cyan-500/25 text-cyan-200 rounded-full px-2 py-0.5"
+                    >
+                        <CheckCircle2 className="w-2.5 h-2.5" />
+                        {TOOL_LABELS[ev.stage] || ev.stage}
+                        {ev.detail?.count != null && <span className="text-cyan-300/60">({ev.detail.count})</span>}
+                    </motion.div>
+                ))}
+            </div>
         </div>
     );
 }
@@ -197,13 +238,20 @@ function LiveDiagnoserPipeline() {
                             ))}
                         </div>
 
+                        {/* Real parallel fan-out: incident_analysis() ran these seven tool
+                            calls in one asyncio.gather() — this row fills in as each one's
+                            trace event arrives, exactly like Trace/Logs/Net agents branching
+                            off a Planner in a classic multi-agent diagram, except every node
+                            here corresponds to a call that actually executed. */}
+                        <ToolFanOut events={events} />
+
                         {errored && (
                             <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded p-2">
                                 {finalRun?.error || 'The run failed — see the trace log below for the last successful step.'}
                             </div>
                         )}
 
-                        <div className="bg-black/30 border border-white/10 rounded-lg max-h-56 overflow-y-auto p-2 space-y-1.5">
+                        <div className="bg-black/60 border border-white/10 rounded-lg max-h-56 overflow-y-auto p-2 space-y-1 font-mono">
                             <AnimatePresence initial={false}>
                                 {events.map((ev) => (
                                     <motion.div
@@ -212,7 +260,9 @@ function LiveDiagnoserPipeline() {
                                         animate={{ opacity: 1, y: 0 }}
                                         className="flex items-center gap-2 text-[11px]"
                                     >
-                                        <span className="text-white/30 font-mono w-16 shrink-0">{ev.agent}</span>
+                                        <span className={`shrink-0 ${ev.status === 'error' ? 'text-red-400' : ev.agent === 'tool' ? 'text-emerald-400/70' : 'text-cyan-400/70'}`}>
+                                            [{ev.agent.toUpperCase()}:{ev.stage.toUpperCase()}]
+                                        </span>
                                         <span className="text-white/70 flex-1 truncate">{ev.title}</span>
                                         {ev.duration_ms != null && <span className="text-white/35 tabular-nums shrink-0">{ev.duration_ms}ms</span>}
                                     </motion.div>

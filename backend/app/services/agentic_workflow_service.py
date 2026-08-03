@@ -176,6 +176,23 @@ async def run_diagnoser(
         duration_ms=int((time.perf_counter() - t0) * 1000),
     )
 
+    # incident_analysis() itself already ran these as one asyncio.gather() —
+    # a real parallel tool fan-out, not staged for effect. Surfacing them as
+    # individual trace events (deduped by tool name — get_logs runs twice
+    # internally, once for errors) is reporting what actually executed, not
+    # fabricating sub-agents that don't exist.
+    seen_tools = set()
+    for tool_entry in evidence_doc.get("tool_trace") or []:
+        tool_name = tool_entry.get("tool") or "unknown_tool"
+        if tool_name in seen_tools:
+            continue
+        seen_tools.add(tool_name)
+        await agentic_trace_service.emit(
+            run_id, "tool", tool_name,
+            tool_entry.get("summary") or f"{tool_name} complete",
+            detail={"count": tool_entry.get("count"), "params": tool_entry.get("params")},
+        )
+
     t0 = time.perf_counter()
     similar = await rag_service.find_similar_incidents(
         f"root cause of {service_or_incident}", top_k=3, service=service_or_incident,
@@ -222,6 +239,20 @@ async def run_diagnoser(
             "category": (h.get("category") or "infra").lower(),
             "evidence": [str(e)[:300] for e in (h.get("evidence") or [])[:5]],
         })
+
+    await agentic_trace_service.emit(
+        run_id, "diagnoser", "llm_rank", f"LLM proposed {len(hypotheses)} hypothesis/hypotheses",
+        detail={"provider": llm.get("provider"), "model": llm.get("model"), "proposed_count": len(hypotheses)},
+        duration_ms=int((time.perf_counter() - t0) * 1000),
+    )
+
+    # Judge: validate — reject any hypothesis with no cited evidence. A claim
+    # an executive-facing report can't trace back to a specific evidence item
+    # is worse than no claim at all; this is the same rule RASED's RCAAgent
+    # enforces on its own hypotheses, applied here.
+    t0 = time.perf_counter()
+    rejected_count = sum(1 for h in hypotheses if not h["evidence"])
+    hypotheses = [h for h in hypotheses if h["evidence"]]
     hypotheses.sort(key=lambda h: h["confidence"], reverse=True)
     for i, h in enumerate(hypotheses):
         h["rank"] = i + 1
@@ -235,8 +266,9 @@ async def run_diagnoser(
         }]
 
     await agentic_trace_service.emit(
-        run_id, "diagnoser", "llm_rank", f"Ranked {len(hypotheses)} hypothesis/hypotheses",
-        detail={"provider": llm.get("provider"), "model": llm.get("model"), "hypothesis_count": len(hypotheses)},
+        run_id, "diagnoser", "validate",
+        f"Judge validated hypotheses — kept {len(hypotheses)}, rejected {rejected_count} uncited",
+        detail={"kept": len(hypotheses), "rejected": rejected_count},
         duration_ms=int((time.perf_counter() - t0) * 1000),
     )
 
