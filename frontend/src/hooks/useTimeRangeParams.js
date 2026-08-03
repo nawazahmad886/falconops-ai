@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useGlobalFilters } from '../context/GlobalFiltersContext';
 
 // Mirrors EnterpriseLayout.js's TIME_RANGES value set exactly (5m/15m/1h/6h/
@@ -27,25 +28,35 @@ const RANGE_HOURS = {
 export function useTimeRangeParams() {
     const { timeRange, customRange } = useGlobalFilters();
 
-    const isCustom = timeRange === 'custom';
-    const now = new Date();
+    // Memoized on the selection itself, not recomputed from `new Date()` on
+    // every render: an unmemoized `now` produces a new startTime/endTime
+    // string every single render, which any consumer's useCallback/useEffect
+    // dependency array turns into an infinite render -> refetch -> render
+    // loop (ProblemsPage.js and MetricsExplorerPage.js both depend on
+    // startTime this way). Freshness still comes from the refresh-interval
+    // mechanism (useAutoRefresh) or an explicit user action, not from this
+    // hook silently ticking forward on its own.
+    return useMemo(() => {
+        const isCustom = timeRange === 'custom';
+        const now = new Date();
 
-    if (isCustom && customRange.start && customRange.end) {
-        const start = new Date(customRange.start);
-        const end = new Date(customRange.end);
-        const hours = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60)));
-        return { hours, startTime: start.toISOString(), endTime: end.toISOString(), isCustom: true };
-    }
+        if (isCustom && customRange.start && customRange.end) {
+            const start = new Date(customRange.start);
+            const end = new Date(customRange.end);
+            const hours = Math.max(1, Math.ceil((end - start) / (1000 * 60 * 60)));
+            return { hours, startTime: start.toISOString(), endTime: end.toISOString(), isCustom: true };
+        }
 
-    // Custom selected but no range entered yet (or invalid) — honest 24h
-    // fallback, same default every other range effectively has, not a silent
-    // wrong-but-plausible-looking custom window.
-    const hours = isCustom ? 24 : (RANGE_HOURS[timeRange] || 24);
-    const start = new Date(now.getTime() - hours * 60 * 60 * 1000);
-    return {
-        hours: Math.max(1, Math.ceil(hours)),
-        startTime: start.toISOString(),
-        endTime: now.toISOString(),
-        isCustom,
-    };
+        // Custom selected but no range entered yet (or invalid) — honest 24h
+        // fallback, same default every other range effectively has, not a
+        // silent wrong-but-plausible-looking custom window.
+        const hours = isCustom ? 24 : (RANGE_HOURS[timeRange] || 24);
+        const start = new Date(now.getTime() - hours * 60 * 60 * 1000);
+        return {
+            hours: Math.max(1, Math.ceil(hours)),
+            startTime: start.toISOString(),
+            endTime: now.toISOString(),
+            isCustom,
+        };
+    }, [timeRange, customRange.start, customRange.end]);
 }
