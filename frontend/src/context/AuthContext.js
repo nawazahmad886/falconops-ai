@@ -85,6 +85,16 @@ export const AuthProvider = ({ children }) => {
         setUser(null);
     };
 
+    // Partial profile update (currently full_name/phone) — phone is what lets
+    // the Problems console's "Notify Owner" action actually reach this user
+    // over SMS. Updates local `user` state so consumers (SettingsPage, the
+    // Problems console) see the change without a full reload.
+    const updateProfile = async (patch) => {
+        const response = await axiosInstance.patch('/auth/me', patch);
+        setUser(response.data);
+        return response.data;
+    };
+
     const value = {
         user,
         token,
@@ -92,6 +102,7 @@ export const AuthProvider = ({ children }) => {
         login,
         register,
         logout,
+        updateProfile,
         isAuthenticated: !!user,
         isAdmin: user?.role === 'admin',
         isViewer: user?.role === 'viewer',

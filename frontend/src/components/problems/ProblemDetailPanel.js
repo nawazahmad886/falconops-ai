@@ -1,10 +1,24 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../ui/card';
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../ui/dialog';
+import { Input } from '../ui/input';
 import {
-    Brain, GitBranch, History, Layers, Loader2, Sparkles, X,
+    Brain, GitBranch, History, Layers, Loader2, Mail, MessageSquare, Send,
+    Sparkles, Terminal, Wand2, X,
 } from 'lucide-react';
+
+// Curated for the Problems console — a subset of remediation_service.py's
+// full ACTION_LIBRARY that's directly relevant to "handle this problem right
+// now" (restart/kill a process, clear logs, restart a resource hog), not the
+// whole library (block_ip, rotate_credentials, etc. belong to other flows).
+const REMEDIATION_ACTIONS = [
+    { id: 'restart_service', label: 'Restart Service', fields: ['service_name', 'host'] },
+    { id: 'kill_process', label: 'Kill Runaway Process', fields: ['process_name', 'host'] },
+    { id: 'restart_top_consumer', label: 'Restart Top CPU/Memory Consumer', fields: ['process_name', 'host', 'resource_type'] },
+    { id: 'clear_logs', label: 'Clear/Truncate Logs', fields: ['log_path', 'host'] },
+];
 
 const SEVERITY_BADGE = {
     critical: 'bg-rose-500/15 text-rose-300 border-rose-500/30',
@@ -30,9 +44,56 @@ const EnrichmentBlock = ({ icon: Icon, title, children, reason }) => (
     </Card>
 );
 
-export default function ProblemDetailPanel({ problem, loading, onClose }) {
+export default function ProblemDetailPanel({
+    problem, loading, onClose,
+    onNotify, onRemediate, onGenerateFixSuggestion,
+    fixSuggestion, fixSuggestionLoading,
+}) {
+    const [notifyOpen, setNotifyOpen] = useState(false);
+    const [notifyChannels, setNotifyChannels] = useState(['email']);
+    const [notifyMessage, setNotifyMessage] = useState('');
+    const [notifying, setNotifying] = useState(false);
+
+    const [remediateOpen, setRemediateOpen] = useState(false);
+    const [remediateActionId, setRemediateActionId] = useState(REMEDIATION_ACTIONS[0].id);
+    const [remediateParams, setRemediateParams] = useState({});
+    const [remediating, setRemediating] = useState(false);
+    const [remediateResult, setRemediateResult] = useState(null);
+
     if (!problem) return null;
     const enrichment = problem.enrichment || {};
+    const selectedAction = REMEDIATION_ACTIONS.find((a) => a.id === remediateActionId) || REMEDIATION_ACTIONS[0];
+
+    const toggleChannel = (channel) => {
+        setNotifyChannels((prev) => (prev.includes(channel) ? prev.filter((c) => c !== channel) : [...prev, channel]));
+    };
+
+    const submitNotify = async () => {
+        setNotifying(true);
+        try {
+            await onNotify(problem.id, notifyChannels, notifyMessage || undefined);
+            setNotifyOpen(false);
+            setNotifyMessage('');
+        } catch (_e) {
+            // already toasted by the caller (ProblemsPage.js) — keep the
+            // dialog open so the user can see the error and retry.
+        } finally {
+            setNotifying(false);
+        }
+    };
+
+    const submitRemediate = async () => {
+        setRemediating(true);
+        setRemediateResult(null);
+        try {
+            const result = await onRemediate(problem.id, remediateActionId, remediateParams);
+            setRemediateResult(result);
+        } catch (_e) {
+            // already toasted by the caller (ProblemsPage.js)
+        } finally {
+            setRemediating(false);
+        }
+    };
 
     return (
         <div className="fixed inset-0 z-50 flex justify-end" data-testid="problem-detail-panel">
@@ -62,6 +123,45 @@ export default function ProblemDetailPanel({ problem, loading, onClose }) {
                     <div>Started: <span className="text-white/80">{problem.started_at}</span></div>
                     <div>Correlation ID: <span className="text-white/80 font-mono">{problem.correlation_id || '—'}</span></div>
                 </div>
+
+                <div className="flex flex-wrap gap-2">
+                    <Button size="sm" variant="outline" onClick={() => setNotifyOpen(true)} data-testid="action-notify-owner">
+                        <Send className="w-3.5 h-3.5 mr-1.5" /> Notify Owner
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setRemediateOpen(true)} data-testid="action-remediate">
+                        <Terminal className="w-3.5 h-3.5 mr-1.5" /> Remediate (Preview)
+                    </Button>
+                    <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={fixSuggestionLoading}
+                        onClick={() => onGenerateFixSuggestion(problem.id)}
+                        data-testid="action-generate-fix-suggestion"
+                    >
+                        {fixSuggestionLoading ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5 mr-1.5" />}
+                        {fixSuggestion ? 'Regenerate Fix Suggestion' : 'Generate Fix Suggestion'}
+                    </Button>
+                </div>
+
+                {(fixSuggestion || fixSuggestionLoading) && (
+                    <Card className="bg-black/30 border-cyan-500/20">
+                        <CardHeader className="pb-2">
+                            <CardTitle className="text-xs text-cyan-300 flex items-center gap-1.5">
+                                <Wand2 className="w-3.5 h-3.5" /> Engineer Fix Suggestion (AI-generated)
+                            </CardTitle>
+                        </CardHeader>
+                        <CardContent className="pt-0 text-[12px] text-white/70 space-y-1.5">
+                            {fixSuggestionLoading && <div className="text-white/40">Generating…</div>}
+                            {fixSuggestion && !fixSuggestionLoading && (
+                                <>
+                                    <div className="text-white/50 text-[11px]">{fixSuggestion.summary}</div>
+                                    <div className="text-white/80 whitespace-pre-line">{fixSuggestion.fix_suggestion}</div>
+                                    <div className="text-white/30 text-[10px]">Generated {fixSuggestion.generated_at}</div>
+                                </>
+                            )}
+                        </CardContent>
+                    </Card>
+                )}
 
                 {loading && (
                     <div className="flex items-center gap-2 text-white/40 text-xs py-4 justify-center">
@@ -116,6 +216,96 @@ export default function ProblemDetailPanel({ problem, loading, onClose }) {
                     </div>
                 )}
             </div>
+
+            <Dialog open={notifyOpen} onOpenChange={setNotifyOpen}>
+                <DialogContent className="bg-[#0D1117] border-white/10 max-w-sm">
+                    <DialogHeader>
+                        <DialogTitle className="text-white text-sm">Notify owner</DialogTitle>
+                    </DialogHeader>
+                    <div className="space-y-3 text-sm text-white/70">
+                        <div>Owner: <span className="text-white">{problem.assigned_to || 'Unassigned'}</span></div>
+                        {!problem.assigned_to && (
+                            <div className="text-amber-400 text-xs">This problem has no assigned owner — assign one first.</div>
+                        )}
+                        <div className="flex gap-3">
+                            <label className="flex items-center gap-1.5 text-xs">
+                                <input type="checkbox" checked={notifyChannels.includes('email')} onChange={() => toggleChannel('email')} />
+                                <Mail className="w-3.5 h-3.5" /> Email
+                            </label>
+                            <label className="flex items-center gap-1.5 text-xs">
+                                <input type="checkbox" checked={notifyChannels.includes('sms')} onChange={() => toggleChannel('sms')} />
+                                <MessageSquare className="w-3.5 h-3.5" /> SMS
+                            </label>
+                        </div>
+                        <Input
+                            placeholder="Optional message (defaults to problem summary)"
+                            value={notifyMessage}
+                            onChange={(e) => setNotifyMessage(e.target.value)}
+                            className="bg-black/40 border-white/10"
+                            data-testid="notify-message-input"
+                        />
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="outline" size="sm" onClick={() => setNotifyOpen(false)}>Cancel</Button>
+                        <Button
+                            size="sm"
+                            disabled={!problem.assigned_to || notifyChannels.length === 0 || notifying}
+                            onClick={submitNotify}
+                            data-testid="notify-submit"
+                        >
+                            {notifying ? 'Sending…' : 'Send'}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
+
+            <Dialog open={remediateOpen} onOpenChange={(open) => { setRemediateOpen(open); if (!open) setRemediateResult(null); }}>
+                <DialogContent className="bg-[#0D1117] border-white/10 max-w-md">
+                    <DialogHeader>
+                        <DialogTitle className="text-white text-sm">Remediation preview</DialogTitle>
+                    </DialogHeader>
+                    <div className="text-[11px] text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1.5">
+                        Preview only — this resolves and logs the exact command that would run, but never
+                        executes it against real infrastructure. See the Live Execution Roadmap for what
+                        real execution would require.
+                    </div>
+                    <div className="space-y-2">
+                        <label className="text-xs text-white/50">Action</label>
+                        <select
+                            value={remediateActionId}
+                            onChange={(e) => { setRemediateActionId(e.target.value); setRemediateParams({}); setRemediateResult(null); }}
+                            className="w-full bg-black/40 border border-white/10 rounded px-2 py-1.5 text-sm text-white"
+                            data-testid="remediate-action-select"
+                        >
+                            {REMEDIATION_ACTIONS.map((a) => (
+                                <option key={a.id} value={a.id}>{a.label}</option>
+                            ))}
+                        </select>
+                        {selectedAction.fields.map((field) => (
+                            <Input
+                                key={field}
+                                placeholder={field.replace(/_/g, ' ')}
+                                value={remediateParams[field] || ''}
+                                onChange={(e) => setRemediateParams((prev) => ({ ...prev, [field]: e.target.value }))}
+                                className="bg-black/40 border-white/10"
+                                data-testid={`remediate-param-${field}`}
+                            />
+                        ))}
+                    </div>
+                    {remediateResult && (
+                        <div className="text-[11px] bg-black/40 border border-white/10 rounded p-2 space-y-1">
+                            <div className="font-mono text-white/70">{remediateResult.resolved_script}</div>
+                            <div className="text-emerald-300">{remediateResult.result}</div>
+                        </div>
+                    )}
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button variant="outline" size="sm" onClick={() => setRemediateOpen(false)}>Close</Button>
+                        <Button size="sm" disabled={remediating} onClick={submitRemediate} data-testid="remediate-submit">
+                            {remediating ? 'Previewing…' : 'Preview Action'}
+                        </Button>
+                    </div>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

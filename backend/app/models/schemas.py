@@ -26,6 +26,13 @@ class UserResponse(BaseModel):
     organization: Optional[str] = None
     role: str = "user"
     created_at: str
+    phone: Optional[str] = None
+
+class UserUpdateRequest(BaseModel):
+    """PATCH /api/auth/me body. Every field optional and only set-if-provided —
+    this is a partial update, not a replacement of the user document."""
+    full_name: Optional[str] = None
+    phone: Optional[str] = None
 
 class TokenResponse(BaseModel):
     access_token: str

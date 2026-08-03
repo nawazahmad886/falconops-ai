@@ -94,6 +94,29 @@ ACTION_LIBRARY = {
         "params": ["host", "process_name"],
         "script_template": "pkill -f {process_name}",
     },
+    "clear_logs": {
+        "name": "Clear/Truncate Log Files",
+        "description": "Truncate log files under a path in place (does not delete them, so an already-open file handle keeps writing) to relieve disk pressure",
+        "category": "infrastructure",
+        "risk_level": "low",
+        "auto_eligible": True,
+        "params": ["host", "log_path"],
+        "script_template": "find {log_path} -type f -name '*.log' -exec truncate -s 0 {} \\;",
+    },
+    "restart_top_consumer": {
+        "name": "Restart Top CPU/Memory Consumer",
+        "description": (
+            "Restart the process consuming the most CPU or memory on a host. "
+            "process_name must be supplied by the engineer — FalconOps does not yet ingest "
+            "per-process CPU/memory telemetry from OneAgent, so this cannot auto-identify "
+            "the process on its own; see the Problems console's 'Live Execution Roadmap' note."
+        ),
+        "category": "performance",
+        "risk_level": "medium",
+        "auto_eligible": False,
+        "params": ["host", "resource_type", "process_name"],
+        "script_template": "systemctl restart {process_name}",
+    },
 }
 
 # ======================== RCA -> REMEDIATION MAPPING ========================
@@ -262,6 +285,16 @@ async def get_action_library() -> List[Dict]:
 async def get_remediation_history(limit: int = 50) -> List[Dict]:
     """Get recent remediation execution history"""
     return await db.remediation_history.find({}, {"_id": 0}).sort("started_at", -1).limit(limit).to_list(limit)
+
+
+async def get_remediation_history_for_problem(problem_id: str, limit: int = 50) -> List[Dict]:
+    """Remediation records triggered from the Problems console carry
+    params.problem_id (see problems_routes.py's /remediate route) — it's
+    stored verbatim even though it never matches a {problem_id} placeholder
+    in any script_template, purely for this lookup."""
+    return await db.remediation_history.find(
+        {"params.problem_id": problem_id}, {"_id": 0},
+    ).sort("started_at", -1).limit(limit).to_list(limit)
 
 
 async def get_remediation_stats() -> Dict:

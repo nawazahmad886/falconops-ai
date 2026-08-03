@@ -755,3 +755,142 @@ async def export_rows(
         limit=EXPORT_ROW_CEILING, offset=0, tenant_id=tenant_id,
     )
     return result["problems"]
+
+
+# ─────────────────────────────────────────────────────
+#  AI fix suggestion (on-demand, cached — not part of _enrich_problem)
+# ─────────────────────────────────────────────────────
+
+FIX_SUGGESTION_COLLECTION = "problem_fix_suggestions"
+
+
+async def get_cached_fix_suggestion(problem_id: str) -> Optional[Dict[str, Any]]:
+    return await db[FIX_SUGGESTION_COLLECTION].find_one({"problem_id": problem_id}, {"_id": 0})
+
+
+async def generate_fix_suggestion(problem_id: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
+    """On-demand, cached — call only from an explicit Generate/Regenerate
+    action, never from the list/grid view. Complements rather than
+    duplicates _enrich_problem's existing ai_analysis (root-cause) and
+    ie-only recommendation blocks: this always runs for any problem type
+    (ae/ie/se/si), and is scoped specifically to "what should the engineer
+    actually do next" — it cites the already-computed root-cause summary as
+    input rather than re-deriving it, so it's one extra LLM call, not two
+    redundant ones."""
+    problem = await get_problem(problem_id, tenant_id=tenant_id)
+    if problem is None:
+        raise LookupError("Problem not found")
+
+    ai_analysis = (problem.get("enrichment") or {}).get("ai_analysis") or {}
+    root_cause_summary = ai_analysis.get("summary") or problem.get("root_cause") or "unknown root cause"
+    service_hint = (problem.get("affected_entities") or [None])[0]
+
+    facts = (
+        f"Title: {problem.get('title')}\n"
+        f"Severity: {problem.get('severity')}\n"
+        f"Status: {problem.get('status')}\n"
+        f"Affected: {service_hint or 'unknown service/host'}\n"
+        f"Duration (seconds): {problem.get('duration_seconds')}\n"
+        f"Root cause analysis so far: {root_cause_summary}\n"
+    )
+    messages = [
+        {"role": "system", "content": (
+            "You are a senior site-reliability engineer writing a fix suggestion for "
+            "another on-call engineer. Given the facts below (already gathered — do not "
+            "ask for more information), write: one sentence summarizing what's wrong, then "
+            "2-4 concrete, specific next steps in priority order. Be specific (name likely "
+            "commands/checks), not generic advice like 'investigate further'. Plain text, "
+            "no markdown headers."
+        )},
+        {"role": "user", "content": facts},
+    ]
+
+    fix_suggestion = None
+    try:
+        from .llm_provider_service import chat_completion
+        result = await chat_completion(messages, session_id=f"problem-fix-{problem_id}")
+        fix_suggestion = (result or {}).get("response", "").strip() or None
+    except Exception as e:
+        logger.warning(f"Fix-suggestion LLM call failed for {problem_id}: {e}")
+
+    if not fix_suggestion:
+        fix_suggestion = (
+            "AI fix suggestion unavailable (no LLM provider configured, or the call failed). "
+            "Fall back to the Recommended Remediation / AI Root Cause Analysis panels above, "
+            "or the remediation action library, to choose a next step manually."
+        )
+
+    doc = {
+        "problem_id": problem_id,
+        "summary": f"{problem.get('title')} — {root_cause_summary}",
+        "fix_suggestion": fix_suggestion,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db[FIX_SUGGESTION_COLLECTION].update_one({"problem_id": problem_id}, {"$set": doc}, upsert=True)
+    return doc
+
+
+# ─────────────────────────────────────────────────────
+#  Notify owner (email / SMS)
+# ─────────────────────────────────────────────────────
+
+NOTIFICATION_COLLECTION = "problem_notifications"
+
+
+async def notify_problem_owner(
+    problem_id: str,
+    channels: List[str],
+    message: Optional[str],
+    triggered_by: str,
+    tenant_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    problem = await get_problem(problem_id, tenant_id=tenant_id)
+    if problem is None:
+        raise LookupError("Problem not found")
+
+    owner_email = problem.get("assigned_to")
+    if not owner_email:
+        raise ValueError("This problem has no assigned owner to notify")
+
+    owner = await db.users.find_one({"email": owner_email}, {"_id": 0})
+    service_hint = (problem.get("affected_entities") or [None])[0]
+    results: Dict[str, Any] = {}
+
+    if "email" in channels:
+        from .notification_service import send_alert_email
+        sent = await send_alert_email(
+            recipient=owner_email,
+            subject=f"[{(problem.get('severity') or 'warning').upper()}] {problem.get('title')} — assigned to you",
+            alert_data={
+                "severity": problem.get("severity"),
+                "title": problem.get("title"),
+                "monitor_name": problem.get("source_label"),
+                "target": service_hint or "N/A",
+                "status": problem.get("status"),
+                "description": message or problem.get("root_cause") or "No additional details",
+            },
+        )
+        results["email"] = {"ok": True, "recipient": owner_email} if sent else {"ok": False, "error": "SendGrid not configured or send failed"}
+
+    if "sms" in channels:
+        if not owner:
+            results["sms"] = {"ok": False, "error": f"no user record found for {owner_email}"}
+        elif not owner.get("phone"):
+            results["sms"] = {"ok": False, "error": "owner has no phone number on file (set via PATCH /api/auth/me)"}
+        else:
+            from .sms_service import send_sms
+            sms_text = message or f"[{problem.get('severity')}] {problem.get('title')} assigned to you. Status: {problem.get('status')}."
+            results["sms"] = await send_sms(owner["phone"], sms_text)
+
+    record = {
+        "problem_id": problem_id,
+        "owner_email": owner_email,
+        "channels": channels,
+        "message": message,
+        "results": results,
+        "triggered_by": triggered_by,
+        "sent_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db[NOTIFICATION_COLLECTION].insert_one(record)
+    record.pop("_id", None)
+    return record

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '../components/ui/card';
@@ -22,9 +22,30 @@ import {
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 
 export const SettingsPage = () => {
-    const { user } = useAuth();
+    const { user, updateProfile } = useAuth();
     const [copied, setCopied] = useState(false);
+    const [phone, setPhone] = useState(user?.phone || '');
+    const [savingPhone, setSavingPhone] = useState(false);
     const webhookUrl = `${BACKEND_URL}/api/alerts/webhook`;
+
+    // user loads asynchronously in AuthContext (fetchUser runs in a
+    // useEffect there) — without this sync, `phone` would stay '' forever
+    // if the user object wasn't ready yet on this component's first render.
+    useEffect(() => {
+        setPhone(user?.phone || '');
+    }, [user?.phone]);
+
+    const savePhone = async () => {
+        setSavingPhone(true);
+        try {
+            await updateProfile({ phone });
+            toast.success('Phone number saved');
+        } catch (e) {
+            toast.error('Failed to save phone number');
+        } finally {
+            setSavingPhone(false);
+        }
+    };
 
     const copyWebhookUrl = () => {
         navigator.clipboard.writeText(webhookUrl);
@@ -114,6 +135,26 @@ export const SettingsPage = () => {
                                             </Badge>
                                         </div>
                                     </div>
+                                </div>
+
+                                <Separator />
+
+                                <div className="grid md:grid-cols-2 gap-4 items-end">
+                                    <div className="space-y-2">
+                                        <Label>Phone Number</Label>
+                                        <Input
+                                            value={phone}
+                                            onChange={(e) => setPhone(e.target.value)}
+                                            placeholder="+1 555 123 4567"
+                                            data-testid="profile-phone"
+                                        />
+                                        <p className="text-xs text-muted-foreground">
+                                            Used for SMS notifications when a Problem is assigned to you (e.g. from the Problems console's "Notify Owner" action). E.164 format recommended.
+                                        </p>
+                                    </div>
+                                    <Button onClick={savePhone} disabled={savingPhone || phone === (user?.phone || '')} data-testid="save-phone">
+                                        {savingPhone ? 'Saving…' : 'Save Phone Number'}
+                                    </Button>
                                 </div>
                             </CardContent>
                         </Card>

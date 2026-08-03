@@ -47,6 +47,8 @@ export default function ProblemsPage() {
     const [connected, setConnected] = useState(false);
     const [selectedProblem, setSelectedProblem] = useState(null);
     const [detailLoading, setDetailLoading] = useState(false);
+    const [fixSuggestion, setFixSuggestion] = useState(null);
+    const [fixSuggestionLoading, setFixSuggestionLoading] = useState(false);
     const [assignTarget, setAssignTarget] = useState(null);
     const [assignValue, setAssignValue] = useState('');
 
@@ -141,6 +143,7 @@ export default function ProblemsPage() {
     const openDetail = useCallback(async (problem) => {
         setSelectedProblem(problem);
         setDetailLoading(true);
+        setFixSuggestion(null);
         try {
             const r = await fetch(`${API}/api/problems/${encodeURIComponent(problem.id)}`, { headers: authHeaders() });
             if (r.ok) setSelectedProblem(await r.json());
@@ -148,6 +151,59 @@ export default function ProblemsPage() {
             toast.error('Failed to load problem detail');
         } finally {
             setDetailLoading(false);
+        }
+        // Best-effort — a 404 here just means nothing's been generated yet,
+        // not an error worth surfacing to the user.
+        try {
+            const r = await fetch(`${API}/api/problems/${encodeURIComponent(problem.id)}/fix-suggestion`, { headers: authHeaders() });
+            if (r.ok) setFixSuggestion(await r.json());
+        } catch (_e) { /* no cached suggestion yet */ }
+    }, []);
+
+    const notifyOwner = useCallback(async (problemId, channels, message) => {
+        try {
+            const r = await fetch(`${API}/api/problems/${encodeURIComponent(problemId)}/notify`, {
+                method: 'POST', headers: authHeaders(), body: JSON.stringify({ channels, message }),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const result = await r.json();
+            const summary = Object.entries(result.results || {})
+                .map(([channel, res]) => `${channel}: ${res.ok ? 'sent' : res.error}`)
+                .join(', ');
+            toast.success(`Owner notified — ${summary}`);
+        } catch (e) {
+            toast.error(`Notify failed: ${e.message?.slice(0, 200)}`);
+            throw e;
+        }
+    }, []);
+
+    const remediateProblem = useCallback(async (problemId, actionId, params) => {
+        try {
+            const r = await fetch(`${API}/api/problems/${encodeURIComponent(problemId)}/remediate`, {
+                method: 'POST', headers: authHeaders(), body: JSON.stringify({ action_id: actionId, params }),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const result = await r.json();
+            toast.success('Remediation previewed (dry-run — nothing executed)');
+            return result;
+        } catch (e) {
+            toast.error(`Remediation preview failed: ${e.message?.slice(0, 200)}`);
+            throw e;
+        }
+    }, []);
+
+    const generateFixSuggestion = useCallback(async (problemId) => {
+        setFixSuggestionLoading(true);
+        try {
+            const r = await fetch(`${API}/api/problems/${encodeURIComponent(problemId)}/fix-suggestion`, {
+                method: 'POST', headers: authHeaders(),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            setFixSuggestion(await r.json());
+        } catch (e) {
+            toast.error(`Fix suggestion failed: ${e.message?.slice(0, 200)}`);
+        } finally {
+            setFixSuggestionLoading(false);
         }
     }, []);
 
@@ -255,7 +311,12 @@ export default function ProblemsPage() {
                 <ProblemDetailPanel
                     problem={selectedProblem}
                     loading={detailLoading}
-                    onClose={() => setSelectedProblem(null)}
+                    onClose={() => { setSelectedProblem(null); setFixSuggestion(null); }}
+                    onNotify={notifyOwner}
+                    onRemediate={remediateProblem}
+                    onGenerateFixSuggestion={generateFixSuggestion}
+                    fixSuggestion={fixSuggestion}
+                    fixSuggestionLoading={fixSuggestionLoading}
                 />
             )}
 

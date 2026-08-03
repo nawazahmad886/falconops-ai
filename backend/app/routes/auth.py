@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Request
 
 from ..core.database import db
-from ..models.schemas import UserCreate, UserLogin, TokenResponse, UserResponse
+from ..models.schemas import UserCreate, UserLogin, TokenResponse, UserResponse, UserUpdateRequest
 from ..utils.auth import hash_password, verify_password, create_access_token, require_auth
 from fastapi import Depends
 
@@ -100,7 +100,8 @@ async def register(user_data: UserCreate, request: Request):
             full_name=user_data.full_name,
             organization=user_data.organization,
             role="user",
-            created_at=user_doc["created_at"]
+            created_at=user_doc["created_at"],
+            phone=None,
         )
     )
 
@@ -147,7 +148,8 @@ async def login(credentials: UserLogin, request: Request):
             full_name=user["full_name"],
             organization=user.get("organization"),
             role=user.get("role", "user"),
-            created_at=user["created_at"]
+            created_at=user["created_at"],
+            phone=user.get("phone"),
         )
     )
 
@@ -161,5 +163,27 @@ async def get_current_user_profile(current_user: dict = Depends(require_auth)):
         full_name=current_user["full_name"],
         organization=current_user.get("organization"),
         role=current_user.get("role", "user"),
-        created_at=current_user["created_at"]
+        created_at=current_user["created_at"],
+        phone=current_user.get("phone"),
+    )
+
+
+@router.patch("/me", response_model=UserResponse)
+async def update_current_user_profile(update: UserUpdateRequest, current_user: dict = Depends(require_auth)):
+    """Partial profile update — currently full_name and phone. phone is what
+    lets problem-owner SMS notifications (Problems console) actually reach
+    this user; without it set, SMS notify falls back to "no phone on file"."""
+    changes = {k: v for k, v in update.model_dump().items() if v is not None}
+    if changes:
+        await db.users.update_one({"id": current_user["id"]}, {"$set": changes})
+
+    updated = await db.users.find_one({"id": current_user["id"]}, {"_id": 0})
+    return UserResponse(
+        id=updated["id"],
+        email=updated["email"],
+        full_name=updated["full_name"],
+        organization=updated.get("organization"),
+        role=updated.get("role", "user"),
+        created_at=updated["created_at"],
+        phone=updated.get("phone"),
     )

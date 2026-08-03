@@ -7,7 +7,7 @@ federation. See the Problems console plan for the full architecture writeup.
 """
 import io
 import logging
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..core.config import JWT_ALGORITHM, JWT_SECRET
 from ..services import problems_service
+from ..services import remediation_service
 from ..services.problems_broadcaster import problems_manager
 from ..utils.auth import require_auth, require_write_access
 
@@ -36,6 +37,16 @@ class ResolveRequest(BaseModel):
 class SuppressRequest(BaseModel):
     reason: str
     expires_at: Optional[str] = None
+
+
+class NotifyRequest(BaseModel):
+    channels: List[str] = ["email"]
+    message: Optional[str] = None
+
+
+class RemediateRequest(BaseModel):
+    action_id: str
+    params: dict = {}
 
 
 # ─────────────────────────────────────────────────────
@@ -243,5 +254,63 @@ async def escalate_route(problem_id: str, current_user: dict = Depends(require_w
         return await problems_service.escalate_problem(problem_id)
     except ValueError as e:
         raise HTTPException(409, str(e))
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
+# ─────────────────────────────────────────────────────
+#  Notify owner (email / SMS)
+# ─────────────────────────────────────────────────────
+
+@router.post("/{problem_id}/notify")
+async def notify_route(problem_id: str, req: NotifyRequest, current_user: dict = Depends(require_write_access)):
+    tenant_id = current_user.get("tenant_id")
+    try:
+        return await problems_service.notify_problem_owner(
+            problem_id, req.channels, req.message, current_user.get("email", "unknown"), tenant_id=tenant_id,
+        )
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ─────────────────────────────────────────────────────
+#  Remediation (dry-run/preview only — see remediation_service.py's module
+#  docstring; nothing behind this route ever touches a real host)
+# ─────────────────────────────────────────────────────
+
+@router.post("/{problem_id}/remediate")
+async def remediate_route(problem_id: str, req: RemediateRequest, current_user: dict = Depends(require_write_access)):
+    if req.action_id not in remediation_service.ACTION_LIBRARY:
+        raise HTTPException(400, f"Unknown action_id: {req.action_id}")
+    params = {**req.params, "problem_id": problem_id}
+    return await remediation_service.execute_remediation(
+        req.action_id, params, trigger=f"problem:{problem_id}", triggered_by=current_user.get("email", "system"),
+    )
+
+
+@router.get("/{problem_id}/remediation-history")
+async def remediation_history_route(problem_id: str, current_user: dict = Depends(require_auth)):
+    return {"history": await remediation_service.get_remediation_history_for_problem(problem_id)}
+
+
+# ─────────────────────────────────────────────────────
+#  AI fix suggestion
+# ─────────────────────────────────────────────────────
+
+@router.get("/{problem_id}/fix-suggestion")
+async def get_fix_suggestion_route(problem_id: str, current_user: dict = Depends(require_auth)):
+    cached = await problems_service.get_cached_fix_suggestion(problem_id)
+    if not cached:
+        raise HTTPException(404, "No fix suggestion generated yet for this problem")
+    return cached
+
+
+@router.post("/{problem_id}/fix-suggestion")
+async def generate_fix_suggestion_route(problem_id: str, current_user: dict = Depends(require_auth)):
+    tenant_id = current_user.get("tenant_id")
+    try:
+        return await problems_service.generate_fix_suggestion(problem_id, tenant_id=tenant_id)
     except LookupError as e:
         raise HTTPException(404, str(e))
