@@ -2,7 +2,7 @@
 Unified activity timeline for the Control Center.
 
 FalconOps already logs administrative/operational activity — it's just
-scattered across nine independent subsystems, each with its own collection
+scattered across eleven independent subsystems, each with its own collection
 and its own narrow, subsystem-specific view (RBAC's audit page, the Admin
 Console's config-audit tab, etc.). Nothing here is a new writer; this reads
 each existing trail (reusing an existing getter function wherever one
@@ -149,8 +149,31 @@ async def _backup_events(limit: int) -> List[Dict[str, Any]]:
     } for r in rows]
 
 
+@_safe("rased_investigations")
+async def _rased_events(limit: int) -> List[Dict[str, Any]]:
+    """One row per RASED investigation reaching a terminal status — not one
+    row per trace event (that's hundreds per investigation; belongs in the
+    incident's own trace view, not this cross-cutting feed)."""
+    from ...core.database import db
+    rows = await db.rased_investigations.find(
+        {"status": {"$in": ["resolved", "escalated", "suppressed"]}}, {"_id": 0},
+    ).sort("updated_at", -1).limit(limit).to_list(limit)
+    return [{
+        "kind": "rased_investigation", "title": f"RASED investigation {r.get('incident_id')} — {r.get('status')}",
+        "detail": {"confidence": r.get("confidence"), "root_signature": r.get("root_signature"),
+                   "verification": (r.get("verification") or {}).get("recovered")},
+        "actor": "rased",
+        # updated_at is a real BSON datetime (InvestigationState.updated_at),
+        # not the ISO string every other source in this file emits — the
+        # final merge sort compares "at" values across all sources, so a raw
+        # datetime here would TypeError against another source's string.
+        "at": r["updated_at"].isoformat() if hasattr(r.get("updated_at"), "isoformat") else r.get("updated_at"),
+        "severity": "critical" if r.get("status") == "escalated" else "info",
+    } for r in rows]
+
+
 async def get_activity_timeline(limit: int = 100, window_hours: int = DEFAULT_WINDOW_HOURS) -> List[Dict[str, Any]]:
-    """Merged, time-sorted feed across all ten subsystems. Each source is
+    """Merged, time-sorted feed across all eleven subsystems. Each source is
     queried for up to `limit` of its own rows (bounded per-source, not
     globally) so one very chatty subsystem can't crowd out the others before
     the final sort+truncate."""
@@ -165,6 +188,7 @@ async def get_activity_timeline(limit: int = 100, window_hours: int = DEFAULT_WI
         _report_schedule_events(per_source_limit),
         _runbook_events(per_source_limit),
         _kafka_events(per_source_limit),
+        _rased_events(per_source_limit),
         _watchdog_events(per_source_limit),
         _backup_events(per_source_limit),
     )

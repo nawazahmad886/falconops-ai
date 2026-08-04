@@ -9,6 +9,7 @@ import { LandingPage } from './pages/LandingPage';
 import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
 import { RasedPage } from './pages/RasedPage';
+import IncidentCommanderPage from './pages/IncidentCommanderPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { IncidentsPage } from './pages/IncidentsPage';
 import { RunbooksPage } from './pages/RunbooksPage';
@@ -225,6 +226,14 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <RasedPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/incident-commander"
+                element={
+                    <ProtectedRoute>
+                        <IncidentCommanderPage />
                     </ProtectedRoute>
                 }
             />

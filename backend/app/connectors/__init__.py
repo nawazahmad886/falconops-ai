@@ -14,3 +14,4 @@ from .prometheus import connector as _prometheus_connector  # noqa: F401
 from .aws import connector as _aws_connector  # noqa: F401
 from .azure import connector as _azure_connector  # noqa: F401
 from .gcp import connector as _gcp_connector  # noqa: F401
+from .k8s import connector as _k8s_connector  # noqa: F401

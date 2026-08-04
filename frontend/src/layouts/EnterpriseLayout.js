@@ -231,6 +231,7 @@ const MODULES = {
         description: 'Supervisor, Diagnoser, Forecaster — one ask-anything hub',
         sidebar: [
             { path: '/agentic-workflow', label: 'Agentic Workflow Hub', icon: Sparkles },
+            { path: '/incident-commander', label: 'AI Incident Commander', icon: Shield },
         ]
     },
     security: {
@@ -381,6 +382,7 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         { type: 'page', label: 'Problems Console', path: '/problems', icon: AlertTriangle },
         { type: 'page', label: 'Resource Explorer', path: '/resources', icon: Box },
         { type: 'page', label: 'Agentic AI Workflow', path: '/agentic-workflow', icon: Sparkles },
+        { type: 'page', label: 'AI Incident Commander', path: '/incident-commander', icon: Shield },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
@@ -714,6 +716,7 @@ export const EnterpriseLayout = ({ children }) => {
         if (path.startsWith('/problems')) return 'problems';
         if (path.startsWith('/resources')) return 'resources';
         if (path.startsWith('/agentic-workflow')) return 'agentic_workflow';
+        if (path.startsWith('/incident-commander')) return 'agentic_workflow';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/control-center', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';

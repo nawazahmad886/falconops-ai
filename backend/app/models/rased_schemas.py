@@ -164,11 +164,40 @@ class TraceEvent(BaseModel):
     incident_id: str
     seq: int
     agent: str
-    kind: Literal["start", "tool_call", "tool_result", "reasoning", "decision", "action", "error"]
+    kind: Literal["start", "tool_call", "tool_result", "reasoning", "decision", "action", "verification", "error"]
     title: str
     detail: Dict[str, Any] = {}
     duration_ms: Optional[int] = None
     at: datetime
+
+
+class MetricSnapshot(BaseModel):
+    """One metric's before/after reading for a verification pass. `recovered`
+    and `improved_pct` are computed once by data/recovery.py at the moment the
+    snapshot is taken, not re-derived — this model is a record of what was
+    actually measured, not a formula."""
+    metric: str
+    service: str
+    before: float
+    after: float
+    unit: str
+    healthy_direction: Literal["down", "up"]
+    improved_pct: float
+    recovered: bool
+
+
+class Verification(BaseModel):
+    """Result of VerificationAgent's before/after check — see
+    agents/verification.py. `available=False` means verification genuinely
+    could not run (no recovery profile for this scenario, action didn't
+    execute) — distinct from `recovered=False` (it ran and the metric didn't
+    recover), never conflated."""
+    incident_id: str
+    available: bool
+    recovered: Optional[bool] = None
+    metrics: List[MetricSnapshot] = []
+    reason: Optional[str] = None
+    verified_at: datetime
 
 
 class InvestigationState(BaseModel):
@@ -192,6 +221,7 @@ class InvestigationState(BaseModel):
     approvals: List[Approval] = []
     audit_log: List[AuditEntry] = []
     trace: List[TraceEvent] = []
+    verification: Optional[Verification] = None
 
     confidence: float = 0.0
     error: Optional[str] = None
@@ -219,5 +249,7 @@ __all__ = [
     "Approval",
     "AuditEntry",
     "TraceEvent",
+    "MetricSnapshot",
+    "Verification",
     "InvestigationState",
 ]

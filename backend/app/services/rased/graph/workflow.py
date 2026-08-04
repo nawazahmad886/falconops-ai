@@ -1,6 +1,12 @@
 """
 RASED LangGraph spine: orchestrate -> retrieve -> analyze -> decide ->
-execute -> case -> done.
+execute -> verify -> case -> done.
+
+verify (agents/verification.py) is what makes "resolved" mean the underlying
+problem actually recovered, not just "the action didn't error" — see that
+module's docstring. It runs unconditionally (like case_management) but only
+has an effect when execute_node left status="resolved" with a successful
+action result; everything else passes through unchanged.
 
 Conditional edges route around outcomes that make the rest of the graph
 unnecessary work: a suppressed storm (orchestrate) skips straight to done
@@ -32,6 +38,7 @@ from ..agents.orchestrator import OrchestratorAgent
 from ..agents.policy import PolicyAgent
 from ..agents.rca import RCAAgent
 from ..agents.telemetry import TelemetryRetrievalAgent
+from ..agents.verification import VerificationAgent
 from .checkpointer import MongoCheckpointer
 
 _orchestrator = OrchestratorAgent()
@@ -40,6 +47,7 @@ _impact = ImpactAgent()
 _rca = RCAAgent()
 _policy = PolicyAgent()
 _action = ActionAgent()
+_verification = VerificationAgent()
 _case_mgmt = CaseManagementAgent()
 
 
@@ -69,6 +77,11 @@ async def execute_node(state: InvestigationState) -> dict:
     return await _action.run(state)
 
 
+@guarded_node("verification")
+async def verify_node(state: InvestigationState) -> dict:
+    return await _verification.run(state)
+
+
 @guarded_node("case_management")
 async def case_node(state: InvestigationState) -> dict:
     return await _case_mgmt.run(state)
@@ -93,6 +106,7 @@ def build_graph(checkpointer=None):
     graph.add_node("analyze", analyze_node)
     graph.add_node("decide", decide_node)
     graph.add_node("execute", execute_node)
+    graph.add_node("verify", verify_node)
     graph.add_node("case", case_node)
     graph.add_node("done", done_node)
 
@@ -105,7 +119,8 @@ def build_graph(checkpointer=None):
     graph.add_edge("retrieve", "analyze")
     graph.add_edge("analyze", "decide")
     graph.add_edge("decide", "execute")
-    graph.add_edge("execute", "case")
+    graph.add_edge("execute", "verify")
+    graph.add_edge("verify", "case")
     graph.add_edge("case", "done")
     graph.add_edge("done", END)
 
@@ -119,6 +134,7 @@ __all__ = [
     "analyze_node",
     "decide_node",
     "execute_node",
+    "verify_node",
     "case_node",
     "done_node",
 ]

@@ -27,6 +27,8 @@ PERMISSIONS = {
     "security.simulate": "Run attack simulations",
     "remediation.view": "View remediation history",
     "remediation.execute": "Execute remediation actions",
+    "remediation.approve_destructive": "Approve DESTRUCTIVE-tier actions (RASED rollback/failover) — "
+                                        "a higher bar than remediation.execute's GUARDED-tier default",
     "ueba.view": "View user behavior analytics",
     "impact.analyze": "Run impact analysis",
     "integrations.view": "View integration catalog",

@@ -89,6 +89,8 @@ from .rased_demo_routes import router as rased_demo_router
 from .control_center_routes import router as control_center_router
 from .backup_routes import router as backup_router
 from .onboarding_routes import router as onboarding_router
+from .incident_commander_routes import router as incident_commander_router, audit_router as incident_commander_audit_router
+from .troubleshooting_routes import router as troubleshooting_router
 
 # Export all routers
 all_routers = [
@@ -187,4 +189,7 @@ all_routers = [
     control_center_router,
     backup_router,
     onboarding_router,
+    incident_commander_router,
+    incident_commander_audit_router,
+    troubleshooting_router,
 ]

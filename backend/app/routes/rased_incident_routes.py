@@ -177,6 +177,14 @@ async def _decide(incident_id: str, approved: bool, reason: Optional[str], decid
 async def approve_incident_action(
     incident_id: str, payload: ApprovalDecisionPayload, current_user: dict = Depends(require_auth),
 ):
+    # ActionAgent (agents/action.py) only ever interrupts for DESTRUCTIVE-tier
+    # actions — status=="awaiting_approval" implies DESTRUCTIVE by construction,
+    # no need to separately inspect the pending action's tier here. Rejecting
+    # doesn't need this higher bar (declining a risky action is the safe
+    # direction); only approving one does.
+    from ..services.rbac_service import check_permission
+    if not await check_permission(current_user, "remediation.approve_destructive"):
+        raise HTTPException(status_code=403, detail="requires remediation.approve_destructive permission")
     return await _decide(incident_id, approved=True, reason=payload.reason, decided_by=current_user.get("email", "unknown"))
 
 

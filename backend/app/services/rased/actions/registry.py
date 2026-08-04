@@ -22,7 +22,7 @@ ACTIONS: Dict[str, ActionSpec] = {
         description="Add replicas to the affected service",
     ),
     "restart_pod": ActionSpec(
-        tier="GUARDED", adapter="k8s_mock",
+        tier="GUARDED", adapter="k8s_restart_pod",
         description="Restart the affected service's pod(s)",
     ),
     "clear_queue_backlog": ActionSpec(

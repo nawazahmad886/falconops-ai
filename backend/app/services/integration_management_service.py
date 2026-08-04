@@ -199,6 +199,29 @@ INTEGRATION_CATALOG = [
         "capabilities": ["metrics", "ai_context"],
         "connector_id": "gcp_cloud_monitoring",
     },
+    {
+        "id": "kubernetes_cluster",
+        "name": "Kubernetes Cluster",
+        "category": "infrastructure",
+        "description": (
+            "Real cluster connection for RASED's restart_pod remediation action. "
+            "Without this configured, restart_pod runs in simulated mode like every "
+            "other RASED action — this is the one action wired for real execution."
+        ),
+        "icon": "cloud",
+        "fields": [
+            {"key": "api_server_url", "label": "API Server URL", "type": "text", "required": True,
+             "default": "https://kubernetes.default.svc"},
+            {"key": "bearer_token", "label": "Bearer Token", "type": "password", "required": True},
+            {"key": "verify_ssl", "label": "Verify TLS Certificate", "type": "text", "required": False, "default": "true"},
+            {"key": "service_pod_mapping", "label": "Service -> Pod Mapping (JSON)", "type": "text", "required": True,
+             "default": '{"checkout-api": {"namespace": "default", "label_selector": "app=checkout-api"}}'},
+        ],
+        "vendor": "Kubernetes",
+        "version": "1.0.0",
+        "capabilities": [],
+        "connector_id": "kubernetes_cluster",
+    },
 ]
 
 
