@@ -491,7 +491,10 @@ const NotificationsPanel = ({ open, onOpenChange, notifications }) => {
     return (
         <DropdownMenu open={open} onOpenChange={onOpenChange}>
             <DropdownMenuTrigger asChild>
-                <Button variant="ghost" size="icon" className="relative hover:bg-white/5">
+                <Button
+                    variant="ghost" size="icon" className="relative hover:bg-white/5"
+                    aria-label={notifications.length > 0 ? `Notifications (${notifications.length} unread)` : 'Notifications'}
+                >
                     <Bell className="w-5 h-5 text-white/70" />
                     {notifications.length > 0 && (
                         <span className="absolute -top-1 -right-1 w-5 h-5 bg-red-500 rounded-full text-[10px] font-bold flex items-center justify-center">
@@ -860,6 +863,7 @@ export const EnterpriseLayout = ({ children }) => {
                                 onClick={toggleTheme}
                                 className="hover:bg-white/5 hidden md:flex"
                                 title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+                                aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
                                 data-testid="theme-toggle"
                             >
                                 {theme === 'dark' ? <Sun className="w-5 h-5 text-white/70" /> : <Moon className="w-5 h-5 text-white/70" />}
@@ -872,6 +876,7 @@ export const EnterpriseLayout = ({ children }) => {
                                 onClick={() => setCopilotOpen(true)}
                                 className="hover:bg-white/5"
                                 title="AI Copilot"
+                                aria-label="Open AI Copilot"
                             >
                                 <Bot className="w-5 h-5 text-[#00E0FF]" />
                             </Button>
@@ -883,6 +888,7 @@ export const EnterpriseLayout = ({ children }) => {
                                 onClick={() => navigate('/wallboard')}
                                 className="hover:bg-white/5 hidden lg:flex"
                                 title="NOC Wallboard"
+                                aria-label="Open NOC Wallboard"
                             >
                                 <Monitor className="w-5 h-5 text-white/70" />
                             </Button>
@@ -905,7 +911,7 @@ export const EnterpriseLayout = ({ children }) => {
                             {/* User Menu */}
                             <DropdownMenu>
                                 <DropdownMenuTrigger asChild>
-                                    <Button variant="ghost" className="flex items-center gap-2 hover:bg-white/5 h-8 px-2">
+                                    <Button variant="ghost" className="flex items-center gap-2 hover:bg-white/5 h-8 px-2" aria-label="User menu">
                                         <div className="w-7 h-7 rounded bg-primary/20 border border-primary/30 flex items-center justify-center">
                                             <User className="w-3.5 h-3.5 text-primary" />
                                         </div>
@@ -941,6 +947,7 @@ export const EnterpriseLayout = ({ children }) => {
                                 size="icon"
                                 className="lg:hidden"
                                 onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                                aria-label={mobileMenuOpen ? 'Close menu' : 'Open menu'}
                             >
                                 {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                             </Button>

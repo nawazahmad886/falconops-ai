@@ -3,11 +3,34 @@ FalconOps AI - Incident Management Engine
 Correlate alerts into incidents with RCA support
 """
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from ..core.database import db
+
+logger = logging.getLogger(__name__)
+
+# No TTL, deliberately — incidents are the durable postmortem/compliance record,
+# unlike raw metrics/logs. Only indexes, so the collection stays fast as it grows.
+_indexes_ready = False
+
+
+async def _ensure_indexes() -> None:
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        # Covers get_incidents's {tenant_id, status, created_at} and
+        # get_active_incidents's {tenant_id, status} (a prefix of the same index).
+        await db.incidents_engine.create_index(
+            [("tenant_id", 1), ("status", 1), ("created_at", -1)], name="incidents_tenant_status_created")
+        await db.incidents_engine.create_index(
+            [("tenant_id", 1), ("priority_score", -1)], name="incidents_tenant_priority")
+        _indexes_ready = True
+    except Exception as e:
+        logger.warning("incidents_engine index creation skipped: %s", e)
 
 
 async def _broadcast_incident_event(event_type: str, incident: Dict):
@@ -70,9 +93,10 @@ class IncidentEngine:
         created_by: str = "system"
     ) -> Dict:
         """Create a new incident"""
+        await _ensure_indexes()
         incident_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        
+
         incident_doc = {
             "id": incident_id,
             "title": title,

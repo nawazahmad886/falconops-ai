@@ -162,6 +162,43 @@ INTEGRATION_CATALOG = [
         "capabilities": ["metrics", "ai_context"],
         "connector_id": "prometheus",
     },
+    {
+        "id": "azure_monitor",
+        "name": "Azure Monitor",
+        "category": "cloud",
+        "description": "Pull real-time metrics from Azure Monitor for one or more ARM resources",
+        "icon": "cloud",
+        "fields": [
+            {"key": "azure_tenant_id", "label": "Azure AD Tenant ID", "type": "text", "required": True},
+            {"key": "client_id", "label": "App Registration Client ID", "type": "text", "required": True},
+            {"key": "client_secret", "label": "Client Secret", "type": "password", "required": True},
+            {"key": "subscription_id", "label": "Subscription ID", "type": "text", "required": True},
+            {"key": "resource_uris", "label": "Resource IDs (comma-separated ARM resource IDs)", "type": "text", "required": True},
+            {"key": "metric_names", "label": "Metric Names (comma-separated)", "type": "text", "required": False, "default": "Percentage CPU"},
+        ],
+        "vendor": "Microsoft Azure",
+        "version": "1.0.0",
+        "capabilities": ["metrics", "ai_context"],
+        "connector_id": "azure_monitor",
+    },
+    {
+        "id": "gcp_cloud_monitoring",
+        "name": "GCP Cloud Monitoring",
+        "category": "cloud",
+        "description": "Pull real-time metrics from Google Cloud Monitoring for a project",
+        "icon": "cloud",
+        "fields": [
+            {"key": "gcp_project_id", "label": "GCP Project ID", "type": "text", "required": True},
+            {"key": "service_account_json", "label": "Service Account Key (JSON)", "type": "password", "required": True},
+            {"key": "metric_type", "label": "Metric Type(s) (comma-separated)", "type": "text", "required": False,
+             "default": "compute.googleapis.com/instance/cpu/utilization"},
+            {"key": "resource_filter", "label": "Extra Resource Filter (optional)", "type": "text", "required": False},
+        ],
+        "vendor": "Google Cloud",
+        "version": "1.0.0",
+        "capabilities": ["metrics", "ai_context"],
+        "connector_id": "gcp_cloud_monitoring",
+    },
 ]
 
 
@@ -277,6 +314,29 @@ async def test_integration(integration_id: str) -> Dict:
         return {"success": False, "error": "Integration not configured"}
 
     config = cfg.get("config", {})
+    catalog_item = next((c for c in INTEGRATION_CATALOG if c["id"] == integration_id), None)
+
+    # Connector-SDK-backed entries (prometheus, aws_*, azure_monitor,
+    # gcp_cloud_monitoring, ...) declare connector_id — route to that connector's
+    # real test_connection() instead of a per-integration hand-written branch, so
+    # this generalizes to every future SDK connector without a new elif here.
+    if catalog_item and catalog_item.get("connector_id"):
+        from ..connectors.registry import CONNECTOR_REGISTRY
+        from ..connectors.crypto import decrypt_config_secrets
+        connector_cls = CONNECTOR_REGISTRY.get(catalog_item["connector_id"])
+        if connector_cls is None:
+            return {"success": False, "error": f"connector '{catalog_item['connector_id']}' not registered"}
+        decrypted_config = await decrypt_config_secrets(dict(config), catalog_item)
+        connector = connector_cls(decrypted_config)
+        await connector.connect()
+        result = await connector.test_connection()
+        return {
+            "success": result.status == "healthy",
+            "message": result.message,
+            "status": result.status,
+            "tested_at": result.checked_at,
+        }
+
     try:
         import httpx
         from .ssrf_guard import is_safe_outbound_url

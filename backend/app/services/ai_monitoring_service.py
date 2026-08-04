@@ -52,17 +52,31 @@ AI_MONITORING_RETENTION_DAYS = int(os.environ.get("AI_MONITORING_RETENTION_DAYS"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rough $-per-1k-tokens table (representative, used for cost-anomaly heuristics)
+# $-per-1k-tokens, split input/output (blended rates hide the fact that output
+# is typically priced several times higher than input — this table doesn't).
+# Manually maintained — there is no live pricing API wired in. Update when a
+# provider changes pricing; if a model isn't listed, cost_agent returns
+# estimated_cost_usd=None rather than silently guessing a rate (see below).
 # ─────────────────────────────────────────────────────────────────────────────
 USD_PER_1K_TOKENS = {
-    "claude-sonnet-4-5-20250929": 0.0030,
-    "claude-sonnet-4-5": 0.0030,
-    "gpt-4o": 0.0050,
-    "gpt-4o-mini": 0.00015,
-    "gemini-2.5-pro": 0.00125,
-    "ollama": 0.0,
-    "rule_based": 0.0,
+    "claude-sonnet-4-5-20250929": {"input": 0.0030, "output": 0.0150},
+    "claude-sonnet-4-5": {"input": 0.0030, "output": 0.0150},
+    "gpt-4o": {"input": 0.0025, "output": 0.0100},
+    "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
+    "gemini-2.5-pro": {"input": 0.00125, "output": 0.00500},
+    "gemini-1.5-flash": {"input": 0.000075, "output": 0.00030},
+    "ollama": {"input": 0.0, "output": 0.0},
+    "rule_based": {"input": 0.0, "output": 0.0},
 }
+
+
+def _cost_for(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
+    """Real per-model input/output pricing, or None if the model isn't in the
+    table — never a fabricated default rate for an unrecognized model."""
+    rates = USD_PER_1K_TOKENS.get(model)
+    if rates is None:
+        return None
+    return round((input_tokens * rates["input"] + output_tokens * rates["output"]) / 1000.0, 6)
 
 # Prompt-injection regex pre-screen (fast, no LLM call)
 INJECTION_PATTERNS = [
@@ -264,7 +278,8 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24) -> Dict[str, Any]:
+async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24,
+                      input_tokens: int = 0, output_tokens: int = 0) -> Dict[str, Any]:
     # Pull recent token-usage history from the same model
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
     cursor = db.ai_monitoring_events.find(
@@ -276,8 +291,7 @@ async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24) 
         if not model or d.get("model") == model:
             history.append(int(d.get("tokens_total") or 0))
 
-    rate_per_1k = USD_PER_1K_TOKENS.get(model, 0.003)
-    cost = tokens * rate_per_1k / 1000.0
+    cost = _cost_for(model, input_tokens, output_tokens)
 
     avg = statistics.mean(history) if history else tokens
     stdev = statistics.pstdev(history) if len(history) > 5 else max(50, avg * 0.5)
@@ -300,7 +314,7 @@ async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24) 
         "anomaly_detected": anomaly,
         "severity": severity,
         "tokens": tokens,
-        "estimated_cost_usd": round(cost, 6),
+        "estimated_cost_usd": cost,
         "baseline_avg_tokens": round(avg, 1),
         "z_score": round(z, 2),
         "reason": reason,
@@ -625,7 +639,7 @@ async def policy_compliance_agent(*, user_input: str, ai_output: str,
 #     vs the prior baseline window. Flags concept drift / model degradation.
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def drift_agent(*, ai_output: str, tokens_total: int,
+async def drift_agent(*, ai_output: str, tokens_total: int, output_tokens: Optional[int] = None,
                       model: str = "", lookback_hours: int = 24) -> Dict[str, Any]:
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
     cursor = db.ai_monitoring_events.find(
@@ -639,7 +653,9 @@ async def drift_agent(*, ai_output: str, tokens_total: int,
             out_lens.append(int(d.get("tokens_output") or 0))
             totals.append(int(d.get("tokens_total") or 0))
 
-    cur_out_len = _estimate_tokens(ai_output)
+    # Use the real output token count when the caller already has it (avoids
+    # re-estimating a number we just measured for real).
+    cur_out_len = output_tokens if output_tokens is not None else _estimate_tokens(ai_output)
     if len(out_lens) < 20:
         return {"agent": "drift", "drift_detected": False, "severity": "low",
                 "z_score_length": 0, "z_score_ratio": 0,
@@ -849,23 +865,40 @@ async def evaluate_exchange(
     source: str = "ai_copilot",
     skip_llm_agents: bool = False,
     tenant_id: Optional[str] = None,
+    usage: Optional[Dict[str, Any]] = None,
+    prompt_hash: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run all active agents in parallel on one LLM exchange. Persist + return verdict.
 
     skip_llm_agents=True → only the statistical/regex agents (cost, performance,
     PII-leak, drift) run. Useful when you want a cheap monitoring loop on EVERY
     call but reserve the expensive LLM-judged agents for sampled traffic.
+
+    usage: real {input_tokens, output_tokens, total_tokens} from the provider's
+    own API response (llm_provider_service only sets this when the provider
+    actually reported it). When absent, falls back to a character-count
+    estimate — tokens_source on the persisted event says which one was used,
+    so nothing downstream mistakes an estimate for a real number.
     """
     await _ensure_indexes()
-    tokens_estimate = _estimate_tokens(user_input) + _estimate_tokens(ai_output)
+    if usage and usage.get("total_tokens") is not None:
+        tokens_source = "provider"
+        tokens_input = int(usage.get("input_tokens") or 0)
+        tokens_output = int(usage.get("output_tokens") or 0)
+        tokens_estimate = int(usage.get("total_tokens") or (tokens_input + tokens_output))
+    else:
+        tokens_source = "estimated"
+        tokens_input = _estimate_tokens(user_input)
+        tokens_output = _estimate_tokens(ai_output)
+        tokens_estimate = tokens_input + tokens_output
 
     # Statistical / regex agents — always run (cheap, no LLM)
     coros = [
-        cost_agent(tokens=tokens_estimate, model=model),
+        cost_agent(tokens=tokens_estimate, model=model, input_tokens=tokens_input, output_tokens=tokens_output),
         performance_agent(latency_ms=latency_ms, errored=errored,
                           error_message=error_message, model=model),
         pii_leak_agent(ai_output=ai_output),
-        drift_agent(ai_output=ai_output, tokens_total=tokens_estimate, model=model),
+        drift_agent(ai_output=ai_output, tokens_total=tokens_estimate, output_tokens=tokens_output, model=model),
     ]
     # LLM-based agents — gated by skip_llm_agents for cost control
     if not skip_llm_agents:
@@ -898,6 +931,15 @@ async def evaluate_exchange(
 
     verdict = aggregate(agent_outputs, rca=rca)
 
+    # Mask secrets/credentials/PII before this reaches broadly-readable storage —
+    # unlike RASED's sanitize_for_llm() (which also masks IPs/hostnames because
+    # nothing may leave the process toward an external LLM), this keeps IPs/
+    # hostnames visible since they're exactly the diagnostic content the AI
+    # Monitoring page exists to show; only the SECRET_RULE_NAMES subset runs.
+    from .rased.redaction import redact_text, SECRET_RULE_NAMES
+    stored_user_input = redact_text(user_input[:2000], only_categories=SECRET_RULE_NAMES).text
+    stored_ai_output = redact_text(ai_output[:4000], only_categories=SECRET_RULE_NAMES).text
+
     now = datetime.now(timezone.utc)
     event = {
         "id": _new_id(),
@@ -911,14 +953,16 @@ async def evaluate_exchange(
         "tenant_id": tenant_id,
         "model": model,
         "provider": provider,
-        "user_input": user_input[:2000],
-        "ai_output": ai_output[:4000],
+        "prompt_hash": prompt_hash,  # ties this output to the exact system-prompt version that produced it
+        "user_input": stored_user_input,
+        "ai_output": stored_ai_output,
         "latency_ms": latency_ms,
         "errored": errored,
-        "tokens_input": _estimate_tokens(user_input),
-        "tokens_output": _estimate_tokens(ai_output),
+        "tokens_input": tokens_input,
+        "tokens_output": tokens_output,
         "tokens_total": tokens_estimate,
-        "estimated_cost_usd": round(tokens_estimate * USD_PER_1K_TOKENS.get(model, 0.003) / 1000.0, 6),
+        "tokens_source": tokens_source,  # "provider" (real API usage) or "estimated" (char-count heuristic)
+        "estimated_cost_usd": _cost_for(model, tokens_input, tokens_output),
         "agents": agent_outputs,
         "root_cause": rca,
         "verdict": verdict,

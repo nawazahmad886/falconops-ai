@@ -35,10 +35,30 @@ if (config.enableHealthCheck) {
 const webpackConfig = {
   eslint: {
     configure: {
+      // eslint-plugin-jsx-a11y was already a devDependency (package.json) but never
+      // wired into the active lint config — installed, never actually run. Wired in
+      // here as explicit "warn"-level rules rather than pulling in
+      // plugin:jsx-a11y/recommended wholesale (which defaults to "error"): this
+      // codebase has ~97 unaudited pages, and react-scripts fails CI builds
+      // (CI=true) on ESLint errors but not warnings — turning on ~40 error-level
+      // rules retroactively, unverified, risks breaking the existing CI pipeline
+      // on the next push for pre-existing violations nobody's triaged yet.
+      // "warn" makes every violation visible (locally and in CI output) without
+      // that risk; ratchet individual rules to "error" once a page is audited.
+      plugins: ["jsx-a11y"],
       extends: ["plugin:react-hooks/recommended"],
       rules: {
         "react-hooks/rules-of-hooks": "error",
         "react-hooks/exhaustive-deps": "warn",
+        "jsx-a11y/alt-text": "warn",
+        "jsx-a11y/aria-props": "warn",
+        "jsx-a11y/aria-role": "warn",
+        "jsx-a11y/role-has-required-aria-props": "warn",
+        "jsx-a11y/anchor-is-valid": "warn",
+        "jsx-a11y/click-events-have-key-events": "warn",
+        "jsx-a11y/no-static-element-interactions": "warn",
+        "jsx-a11y/label-has-associated-control": "warn",
+        "jsx-a11y/img-redundant-alt": "warn",
       },
     },
   },

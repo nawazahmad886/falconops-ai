@@ -92,6 +92,9 @@ resource_bridge_task = None
 # Background task for the Control Center's job watchdog (auto-restart)
 job_watchdog_task = None
 
+# Background task for the scheduled database backup job
+backup_scheduler_task = None
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -102,6 +105,7 @@ async def lifespan(app: FastAPI):
     global connector_poll_task
     global resource_bridge_task
     global job_watchdog_task
+    global backup_scheduler_task
 
     logger.info("Starting FalconOps AI...")
 
@@ -235,6 +239,17 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Job watchdog init warning: {e}")
 
+    # Database backup scheduler — real scheduled mongodump, see backup_service.py.
+    # Degrades to a logged failure per attempt (never silently skips) if mongodump
+    # isn't installed or MONGO_URL/DB_NAME aren't set — checked at run time, not here,
+    # so the task always starts and status is visible via GET /api/backup/status.
+    try:
+        from app.services.backup_service import backup_loop
+        backup_scheduler_task = asyncio.create_task(backup_loop())
+        logger.info("Database backup scheduler started")
+    except Exception as e:
+        logger.warning(f"Backup scheduler init warning: {e}")
+
     logger.info("FalconOps AI started successfully")
 
     # Start uptime monitor scheduler
@@ -303,6 +318,14 @@ async def lifespan(app: FastAPI):
         job_watchdog_task.cancel()
         try:
             await job_watchdog_task
+        except asyncio.CancelledError:
+            pass
+
+    # Stop the database backup scheduler
+    if backup_scheduler_task:
+        backup_scheduler_task.cancel()
+        try:
+            await backup_scheduler_task
         except asyncio.CancelledError:
             pass
 

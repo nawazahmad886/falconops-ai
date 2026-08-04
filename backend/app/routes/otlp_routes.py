@@ -706,7 +706,6 @@ async def trace_stats(hours: int = Query(1, ge=1, le=8760), user: dict = Depends
             "errors": {"$sum": {"$cond": [{"$eq": ["$status", "ERROR"]}, 1, 0]}},
             "avg_duration": {"$avg": "$duration_ms"},
             "max_duration": {"$max": "$duration_ms"},
-            "p95_duration": {"$avg": "$duration_ms"},
             "total_spans": {"$sum": "$span_count"},
         }},
     ]
@@ -715,6 +714,16 @@ async def trace_stats(hours: int = Query(1, ge=1, le=8760), user: dict = Depends
         r.pop("_id", None)
         stats.update(r)
     stats["error_rate_pct"] = round((stats["errors"] / stats["total"]) * 100, 2) if stats["total"] else 0
+
+    # Real p95, not $avg mislabeled as p95 — same bounded-fetch-then-sort approach
+    # trace_rca_service.analyze_window() already uses for the same collection.
+    durations = sorted([
+        d["duration_ms"] or 0 for d in await db.otel_traces.find(
+            {"received_at": {"$gte": cutoff}}, {"_id": 0, "duration_ms": 1},
+        ).to_list(length=10000)
+    ])
+    stats["p95_duration"] = durations[max(0, int(len(durations) * 0.95) - 1)] if durations else 0
+
     services = await db.otel_traces.distinct("services", {"received_at": {"$gte": cutoff}})
     stats["services_count"] = len([s for s in services if s])
     return stats

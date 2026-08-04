@@ -1,0 +1,22 @@
+{
+  "short_name": "FalconOps AI",
+  "name": "FalconOps AI - Enterprise AIOps & Availability Platform",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
+    },
+    {
+      "src": "icon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "maskable"
+    }
+  ],
+  "start_url": ".",
+  "display": "standalone",
+  "theme_color": "#0A0E14",
+  "background_color": "#0A0E14"
+}

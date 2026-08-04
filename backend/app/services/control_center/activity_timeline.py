@@ -136,8 +136,21 @@ async def _watchdog_events(limit: int) -> List[Dict[str, Any]]:
     } for r in rows]
 
 
+@_safe("backup_history")
+async def _backup_events(limit: int) -> List[Dict[str, Any]]:
+    from ...core.database import db
+    rows = await db.backup_history.find({}, {"_id": 0}).sort("started_at", -1).limit(limit).to_list(limit)
+    return [{
+        "kind": "backup", "title": f"Database backup {'succeeded' if r.get('ok') else 'FAILED'}",
+        "detail": {"path": r.get("path"), "size_bytes": r.get("size_bytes"), "error": r.get("error")},
+        "actor": r.get("triggered_by", "scheduler"),
+        "at": r["started_at"].isoformat() if hasattr(r.get("started_at"), "isoformat") else r.get("started_at"),
+        "severity": "info" if r.get("ok") else "critical",
+    } for r in rows]
+
+
 async def get_activity_timeline(limit: int = 100, window_hours: int = DEFAULT_WINDOW_HOURS) -> List[Dict[str, Any]]:
-    """Merged, time-sorted feed across all nine subsystems. Each source is
+    """Merged, time-sorted feed across all ten subsystems. Each source is
     queried for up to `limit` of its own rows (bounded per-source, not
     globally) so one very chatty subsystem can't crowd out the others before
     the final sort+truncate."""
@@ -153,6 +166,7 @@ async def get_activity_timeline(limit: int = 100, window_hours: int = DEFAULT_WI
         _runbook_events(per_source_limit),
         _kafka_events(per_source_limit),
         _watchdog_events(per_source_limit),
+        _backup_events(per_source_limit),
     )
 
     merged: List[Dict[str, Any]] = [event for source_events in results for event in source_events]

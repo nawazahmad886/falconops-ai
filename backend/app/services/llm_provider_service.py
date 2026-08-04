@@ -39,18 +39,24 @@ AI_MONITORING_FULL_EVAL_SAMPLE_RATE = float(os.environ.get("AI_MONITORING_FULL_E
 #  Provider implementations
 # ─────────────────────────────────────────────────────
 
-async def _chat_ollama(messages: List[Dict], model: str, base_url: str) -> str:
-    """Call a local Ollama instance. Default base_url=http://localhost:11434."""
+async def _chat_ollama(messages: List[Dict], model: str, base_url: str) -> tuple:
+    """Call a local Ollama instance. Default base_url=http://localhost:11434.
+    Returns (text, usage) — Ollama reports real prompt_eval_count/eval_count
+    per non-streaming response, so this is real usage, not an estimate."""
     url = f"{base_url.rstrip('/')}/api/chat"
     payload = {"model": model, "messages": messages, "stream": False, "options": {"temperature": 0.4}}
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(url, json=payload)
         r.raise_for_status()
         data = r.json()
-        return (data.get("message") or {}).get("content", "") or ""
+        text = (data.get("message") or {}).get("content", "") or ""
+        in_tok, out_tok = data.get("prompt_eval_count"), data.get("eval_count")
+        usage = {"input_tokens": in_tok, "output_tokens": out_tok, "total_tokens": (in_tok or 0) + (out_tok or 0)} \
+            if in_tok is not None or out_tok is not None else None
+        return text, usage
 
 
-async def _chat_openai(messages: List[Dict], model: str, api_key: str) -> str:
+async def _chat_openai(messages: List[Dict], model: str, api_key: str) -> tuple:
     url = "https://api.openai.com/v1/chat/completions"
     payload = {"model": model, "messages": messages, "temperature": 0.4}
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -58,10 +64,14 @@ async def _chat_openai(messages: List[Dict], model: str, api_key: str) -> str:
         r = await client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
-        return data["choices"][0]["message"]["content"]
+        text = data["choices"][0]["message"]["content"]
+        u = data.get("usage") or {}
+        usage = {"input_tokens": u.get("prompt_tokens"), "output_tokens": u.get("completion_tokens"),
+                  "total_tokens": u.get("total_tokens")} if u else None
+        return text, usage
 
 
-async def _chat_anthropic(messages: List[Dict], model: str, api_key: str) -> str:
+async def _chat_anthropic(messages: List[Dict], model: str, api_key: str) -> tuple:
     url = "https://api.anthropic.com/v1/messages"
     # Anthropic separates system from messages
     sys_text = next((m["content"] for m in messages if m["role"] == "system"), None)
@@ -78,10 +88,14 @@ async def _chat_anthropic(messages: List[Dict], model: str, api_key: str) -> str
         r = await client.post(url, json=payload, headers=headers)
         r.raise_for_status()
         data = r.json()
-        return data["content"][0]["text"]
+        text = data["content"][0]["text"]
+        u = data.get("usage") or {}
+        usage = {"input_tokens": u.get("input_tokens"), "output_tokens": u.get("output_tokens"),
+                  "total_tokens": (u.get("input_tokens") or 0) + (u.get("output_tokens") or 0)} if u else None
+        return text, usage
 
 
-async def _chat_gemini(messages: List[Dict], model: str, api_key: str) -> str:
+async def _chat_gemini(messages: List[Dict], model: str, api_key: str) -> tuple:
     sys_text = next((m["content"] for m in messages if m["role"] == "system"), None)
     convo = [m for m in messages if m["role"] != "system"]
     contents = []
@@ -96,7 +110,11 @@ async def _chat_gemini(messages: List[Dict], model: str, api_key: str) -> str:
         r = await client.post(url, json=payload, headers={"Content-Type": "application/json"})
         r.raise_for_status()
         data = r.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        u = data.get("usageMetadata") or {}
+        usage = {"input_tokens": u.get("promptTokenCount"), "output_tokens": u.get("candidatesTokenCount"),
+                  "total_tokens": u.get("totalTokenCount")} if u else None
+        return text, usage
 
 
 async def _chat_emergent(messages: List[Dict], model: str, api_key: str, session_id: str) -> str:
@@ -253,11 +271,26 @@ async def resolve_provider() -> Dict:
     }
 
 
+def _prompt_hash(messages: List[Dict]) -> Optional[str]:
+    """Short hash of the system-role message content — lets a stored AI output be
+    traced back to which prompt version produced it (see ai_monitoring_events'
+    prompt_hash field). Only the system prompt: that's what changes when an
+    engineer edits agent behavior, while user/assistant turns vary per-call by
+    design — hashing those too would make every call's hash unique, defeating
+    the point (grouping outputs by prompt version). None if there's no system
+    message to hash."""
+    import hashlib
+    sys_text = next((m.get("content", "") for m in messages if m.get("role") == "system"), None)
+    if not sys_text:
+        return None
+    return hashlib.sha256(sys_text.encode("utf-8")).hexdigest()[:16]
+
+
 async def chat_completion(messages: List[Dict], session_id: Optional[str] = None) -> Dict:
     """Main entry: send a chat completion via the configured provider.
 
     messages: list of {role: 'system'|'user'|'assistant', content: str}
-    Returns: {provider, model, response, fallback_used, blocked?}
+    Returns: {provider, model, response, fallback_used, blocked?, prompt_hash}
     """
     import time as _time
     cfg = await resolve_provider()
@@ -265,6 +298,7 @@ async def chat_completion(messages: List[Dict], session_id: Optional[str] = None
     fallback_used = False
     err_msg: Optional[str] = None
     started = _time.monotonic()
+    prompt_hash = _prompt_hash(messages)
 
     # ─── PRE-FLIGHT INJECTION GUARD ───
     # Synchronous regex pre-screen on the user-content portion of the messages.
@@ -332,16 +366,22 @@ async def chat_completion(messages: List[Dict], session_id: Optional[str] = None
             **blocked_info,
         }
 
+    # usage stays None unless a provider function returns real token counts —
+    # never backfilled with a guess here. See ai_monitoring_service.evaluate_exchange
+    # for the character-count estimate used only when this is None.
+    usage: Optional[Dict] = None
     try:
         if provider == "ollama":
-            text = await _chat_ollama(messages, model, cfg["ollama_base_url"])
+            text, usage = await _chat_ollama(messages, model, cfg["ollama_base_url"])
         elif provider == "openai" and key:
-            text = await _chat_openai(messages, model, key)
+            text, usage = await _chat_openai(messages, model, key)
         elif provider == "anthropic" and key:
-            text = await _chat_anthropic(messages, model, key)
+            text, usage = await _chat_anthropic(messages, model, key)
         elif provider == "gemini" and key:
-            text = await _chat_gemini(messages, model, key)
+            text, usage = await _chat_gemini(messages, model, key)
         elif provider == "emergent" and key:
+            # emergentintegrations doesn't expose the underlying provider's usage
+            # object — real usage isn't available on this path, stays estimated.
             text = await _chat_emergent(messages, model, key, session_id or "default")
         else:
             text = _chat_rule_based(messages)
@@ -377,6 +417,8 @@ async def chat_completion(messages: List[Dict], session_id: Optional[str] = None
                 # Statistical agents always run; LLM-judged agents + root-cause only on a sampled
                 # fraction (AI_MONITORING_FULL_EVAL_SAMPLE_RATE) to bound LLM spend.
                 skip_llm_agents=(random.random() >= AI_MONITORING_FULL_EVAL_SAMPLE_RATE),
+                usage=usage,
+                prompt_hash=prompt_hash,
             ))
         except Exception as _e:
             logger.debug("auto-instrument schedule failed (non-fatal): %s", _e)
@@ -386,6 +428,11 @@ async def chat_completion(messages: List[Dict], session_id: Optional[str] = None
         "model": model if provider != "rule_based" else None,
         "response": text,
         "fallback_used": fallback_used,
+        # None unless the provider's API actually reported token usage — never
+        # a character-count guess at this layer. See ai_monitoring_service for
+        # where the estimate (clearly labeled) is used as a fallback.
+        "usage": usage,
+        "prompt_hash": prompt_hash,
     }
 
 

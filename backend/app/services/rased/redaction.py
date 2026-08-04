@@ -58,14 +58,31 @@ _RULES: List[RedactionRule] = [
 ]
 
 
-def redact_text(text: str) -> RedactionResult:
-    """Mask every rule match in text with [REDACTED:<rule_name>]."""
+# Rule names that are unambiguously bad to store/display anywhere, regardless of
+# context — real secrets/credentials/PII. Distinct from ipv4/ipv6/fqdn, which are
+# masked for RASED's use case (nothing may leave the process toward an external
+# LLM) but are exactly the operational diagnostic content a monitoring platform's
+# own UI needs to show (e.g. ai_monitoring_service's own event log — see its use
+# of only_categories below).
+SECRET_RULE_NAMES = {"email", "aws_access_key", "jwt", "credential_assignment", "credit_card"}
+
+
+def redact_text(text: str, only_categories: "set | None" = None) -> RedactionResult:
+    """Mask every rule match in text with [REDACTED:<rule_name>].
+
+    only_categories: if given, only rules whose name is in this set run — e.g.
+    SECRET_RULE_NAMES for a caller that wants to keep IPs/hostnames visible
+    (operationally useful) while still masking credentials. Default (None) runs
+    every rule, RASED's original all-or-nothing behavior — unchanged for
+    existing callers of sanitize_for_llm()."""
     if not text:
         return RedactionResult(text=text, redacted=False, matched_rules=[])
 
     matched: List[str] = []
     out = text
     for rule in _RULES:
+        if only_categories is not None and rule.name not in only_categories:
+            continue
         if rule.pattern.search(out):
             matched.append(rule.name)
             out = rule.pattern.sub(f"[REDACTED:{rule.name}]", out)
@@ -98,4 +115,4 @@ def sanitize_for_llm(messages: List[dict]) -> List[dict]:
     return sanitized
 
 
-__all__ = ["RedactionRule", "RedactionResult", "redact_text", "redact_payload", "sanitize_for_llm"]
+__all__ = ["RedactionRule", "RedactionResult", "redact_text", "redact_payload", "sanitize_for_llm", "SECRET_RULE_NAMES"]

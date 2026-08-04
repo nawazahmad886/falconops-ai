@@ -69,6 +69,18 @@ TIME_BUCKETS = {
 
 _indexes_ready = False
 
+# Raw high-cardinality metric points have little standalone value after this long —
+# aggregated views (dashboards, capacity predictions) are computed on read from
+# whatever's still in the window, so this doesn't remove any rollup/summary data,
+# only the raw points backing it. Configurable since real retention needs vary by
+# deployment; unlike alerts/incidents (kept indefinitely — see indexes below), this
+# is genuinely safe to auto-expire.
+METRICS_RETENTION_DAYS = int(os.environ.get("METRICS_RETENTION_DAYS", "90"))
+
+
+def _metrics_expires_at() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(days=METRICS_RETENTION_DAYS)
+
 
 async def _ensure_indexes() -> None:
     """db.metrics_timeseries had zero indexes anywhere in the running app (only in a
@@ -92,6 +104,12 @@ async def _ensure_indexes() -> None:
         await db.metrics_timeseries.create_index(
             [("anomaly.is_anomaly", 1), ("timestamp", -1)],
             name="metrics_anomaly_ts")
+        # TTL index — requires a real BSON Date field, which "timestamp" is not (it's
+        # stored as an ISO string throughout this file, matched by existing query code
+        # that compares it lexically). expires_at is a separate Date-typed field set at
+        # insert time purely for this, same pattern ai_monitoring_service uses.
+        await db.metrics_timeseries.create_index(
+            "expires_at", name="metrics_ttl", expireAfterSeconds=0)
         _indexes_ready = True
     except Exception as e:
         logger.warning("metrics_timeseries index creation skipped: %s", e)
@@ -229,7 +247,8 @@ class MetricsTimeSeriesService:
                     "unit": metric.get("unit", ""),
                     "type": metric.get("type", "gauge"),
                     "tenant_id": tenant_id,
-                    "processed_at": now
+                    "processed_at": now,
+                    "expires_at": _metrics_expires_at(),
                 })
             if docs:
                 await db.metrics_timeseries.insert_many(docs)
@@ -242,6 +261,7 @@ class MetricsTimeSeriesService:
         """Store metric directly in MongoDB (system of record) and best-effort
         dual-write to VictoriaMetrics (real TSDB backing query_metrics())."""
         metric_data["processed_at"] = datetime.now(timezone.utc).isoformat()
+        metric_data["expires_at"] = _metrics_expires_at()
         await db.metrics_timeseries.insert_one(metric_data)
         await self._vm_write_batch([metric_data])
 
@@ -320,7 +340,8 @@ class MetricsTimeSeriesService:
                         try:
                             metric_data = json.loads(data.get("data", "{}"))
                             metric_data["processed_at"] = datetime.now(timezone.utc).isoformat()
-                            
+                            metric_data["expires_at"] = _metrics_expires_at()
+
                             # Run anomaly detection
                             anomaly_result = await self.detect_anomaly(
                                 metric_data["name"],

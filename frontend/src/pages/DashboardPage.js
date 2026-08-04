@@ -23,6 +23,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 import { Link } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { LiveAlertFeed } from '../components/LiveAlertFeed';
+import { OnboardingChecklist } from '../components/OnboardingChecklist';
 import { useTimeRangeParams } from '../hooks/useTimeRangeParams';
 import { useAutoRefresh } from '../hooks/useAutoRefresh';
 
@@ -168,6 +169,8 @@ export const DashboardPage = () => {
                         Refresh
                     </Button>
                 </div>
+
+                <OnboardingChecklist />
 
                 {/* Stats Grid - Bento Style */}
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

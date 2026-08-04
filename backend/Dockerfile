@@ -16,13 +16,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Runtime deps only — no build toolchain
+# Runtime deps only — no build toolchain. mongodb-database-tools provides mongodump,
+# used by backup_service.py's scheduled backup job (real, not a stub — see that file).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl libffi8 libssl3 libjpeg62-turbo zlib1g libcap2-bin \
+    curl gnupg libffi8 libssl3 libjpeg62-turbo zlib1g libcap2-bin \
+    && curl -fsSL https://pgp.mongodb.com/server-8.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-8.0.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/8.0 main" > /etc/apt/sources.list.d/mongodb-org-8.0.list \
+    && apt-get update && apt-get install -y --no-install-recommends mongodb-database-tools \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd -r falcon && useradd -r -g falcon -u 1001 -d /app falcon \
-    && mkdir -p /tmp/falconops_reports /tmp/falconops_branding \
-    && chown -R falcon:falcon /app /tmp/falconops_reports /tmp/falconops_branding
+    && mkdir -p /tmp/falconops_reports /tmp/falconops_branding /var/backups/falconops \
+    && chown -R falcon:falcon /app /tmp/falconops_reports /tmp/falconops_branding /var/backups/falconops
 
 # Copy pre-built site-packages from builder
 COPY --from=builder /install /usr/local

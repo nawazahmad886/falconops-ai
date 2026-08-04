@@ -14,6 +14,7 @@ import { toast } from 'sonner';
 import {
     BrainCircuit, ShieldAlert, DollarSign, Gauge, Sparkles, Search, RefreshCw,
     CheckCircle2, AlertTriangle, Activity, Zap, Cpu, AlertCircle, ChevronRight, Beaker,
+    ThumbsUp, ThumbsDown,
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
@@ -147,6 +148,49 @@ function EvaluateDialog({ onClose, onDone }) {
     );
 }
 
+function FeedbackButtons({ event }) {
+    const [feedback, setFeedback] = useState(event.feedback || null);
+    const [submitting, setSubmitting] = useState(false);
+
+    const submit = async (rating) => {
+        setSubmitting(true);
+        try {
+            const r = await fetch(`${API}/api/ai-monitoring/events/${event.id}/feedback`, {
+                method: 'POST', headers: headers(), body: JSON.stringify({ rating }),
+            });
+            if (!r.ok) throw new Error(await r.text());
+            const result = await r.json();
+            setFeedback(result.feedback);
+            toast.success('Feedback recorded');
+        } catch (e) {
+            toast.error(`Feedback failed: ${e.message?.slice(0, 150)}`);
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    return (
+        <div className="flex items-center gap-2 mt-1" data-testid="event-feedback">
+            <span className="text-[10px] uppercase tracking-widest text-white/40">Was this a good answer?</span>
+            <Button
+                size="sm" variant="outline" disabled={submitting}
+                className={`h-6 px-2 ${feedback?.rating === 'up' ? 'border-emerald-500/50 text-emerald-300 bg-emerald-500/10' : ''}`}
+                onClick={() => submit('up')} data-testid="feedback-up"
+            >
+                <ThumbsUp className="w-3 h-3" />
+            </Button>
+            <Button
+                size="sm" variant="outline" disabled={submitting}
+                className={`h-6 px-2 ${feedback?.rating === 'down' ? 'border-red-500/50 text-red-300 bg-red-500/10' : ''}`}
+                onClick={() => submit('down')} data-testid="feedback-down"
+            >
+                <ThumbsDown className="w-3 h-3" />
+            </Button>
+            {feedback && <span className="text-[10px] text-white/30">recorded ({feedback.rating})</span>}
+        </div>
+    );
+}
+
 function EventDetailDialog({ event, onClose }) {
     if (!event) return null;
     return (
@@ -159,7 +203,9 @@ function EventDetailDialog({ event, onClose }) {
                         <span className="text-white/70 text-sm font-normal">{event.model || event.provider}</span>
                     </DialogTitle>
                     <DialogDescription className="text-white/55 text-[11px]">
-                        {event.received_at} · source={event.source} · {event.tokens_total} tokens · ${(event.estimated_cost_usd || 0).toFixed(5)} · {event.latency_ms?.toFixed(0)}ms
+                        {event.received_at} · source={event.source} · {event.tokens_source === 'estimated' ? '~' : ''}{event.tokens_total} tokens
+                        {event.tokens_source === 'estimated' && <span className="text-white/30"> (char-count estimate, not provider-reported)</span>}
+                        {' · '}{event.estimated_cost_usd != null ? `$${event.estimated_cost_usd.toFixed(5)}` : 'cost n/a (unpriced model)'} · {event.latency_ms?.toFixed(0)}ms
                     </DialogDescription>
                 </DialogHeader>
 
@@ -177,6 +223,7 @@ function EventDetailDialog({ event, onClose }) {
                                 <CardContent className="p-3">
                                     <div className="text-[10px] uppercase tracking-widest text-white/40 mb-1">AI Output</div>
                                     <pre className="text-[11px] text-white/80 font-mono whitespace-pre-wrap leading-relaxed">{event.ai_output || '(empty)'}</pre>
+                                    <FeedbackButtons event={event} />
                                 </CardContent>
                             </Card>
                         </div>
@@ -350,7 +397,16 @@ export default function AIMonitoringPage() {
                 <StatTile icon={CheckCircle2} label="Health %" value={healthScore != null ? `${healthScore}%` : '—'} sub={`${totals.healthy ?? 0} healthy`} tint="emerald" />
                 <StatTile icon={AlertTriangle} label="Warning" value={totals.warning ?? 0} tint="amber" />
                 <StatTile icon={AlertCircle} label="Critical" value={totals.critical ?? 0} tint="red" />
-                <StatTile icon={DollarSign} label="Tokens" value={Number(dash?.tokens?.total || 0).toLocaleString()} sub={`$${(dash?.tokens?.cost_usd || 0).toFixed(4)}`} tint="amber" />
+                <StatTile
+                    icon={DollarSign} label="Tokens"
+                    value={Number(dash?.tokens?.total || 0).toLocaleString()}
+                    sub={
+                        dash?.tokens?.unpriced_events
+                            ? `$${(dash?.tokens?.cost_usd || 0).toFixed(4)} (${dash.tokens.unpriced_events} unpriced)`
+                            : `$${(dash?.tokens?.cost_usd || 0).toFixed(4)}`
+                    }
+                    tint="amber"
+                />
                 <StatTile icon={Gauge} label="Avg Latency" value={`${dash?.performance?.avg_latency_ms ?? 0}ms`} sub={`max ${dash?.performance?.max_latency_ms ?? 0}ms`} tint="cyan" />
                 <StatTile icon={ShieldAlert} label="Errored" value={dash?.performance?.errored_count ?? 0} tint={dash?.performance?.errored_count ? 'red' : 'white'} />
             </div>
@@ -396,7 +452,9 @@ export default function AIMonitoringPage() {
                                                 <td className="px-3 py-2"><VerdictBadge status={e.verdict?.system_status} /></td>
                                                 <td className="px-3 py-2 text-white/70 text-[11px]">{e.source}</td>
                                                 <td className="px-3 py-2 text-white/70 text-[11px] truncate max-w-[200px]">{e.model || e.provider}</td>
-                                                <td className="px-3 py-2 text-right text-white/80 tabular-nums">{e.tokens_total}</td>
+                                                <td className="px-3 py-2 text-right text-white/80 tabular-nums" title={e.tokens_source === 'estimated' ? 'Character-count estimate, not provider-reported' : 'Real provider-reported usage'}>
+                                                    {e.tokens_source === 'estimated' ? '~' : ''}{e.tokens_total}
+                                                </td>
                                                 <td className="px-3 py-2 text-right text-white/80 tabular-nums">{Math.round(e.latency_ms || 0)}ms</td>
                                                 <td className="px-3 py-2">
                                                     <div className="flex gap-1 flex-wrap">

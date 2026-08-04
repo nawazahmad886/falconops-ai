@@ -18,7 +18,8 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
-    logger.warning("Playwright not installed. Synthetic monitoring will be simulated.")
+    logger.warning("Playwright not installed. Real-browser synthetic tests will return "
+                    "status='not_configured' instead of executing (never a fabricated result).")
 
 
 class SyntheticTestStep(BaseModel):
@@ -201,41 +202,29 @@ class SyntheticMonitoringService:
                 await page.close()
     
     async def _simulate_login_test(self, config: SyntheticTestConfig, start_time: datetime) -> SyntheticTestResult:
-        """Simulate a login test when Playwright is not available"""
-        import random
-        
-        # Simulate realistic timing
-        await asyncio.sleep(random.uniform(0.5, 2.0))
-        
+        """Playwright isn't installed (or browser init failed) — return an honest
+        'not_configured' result, never a fabricated pass/fail. A monitoring tool
+        reporting a random coin-flip as a real login-journey result is worse than
+        reporting nothing: it would let a genuinely broken login flow show as
+        'passing' roughly 90% of the time. Real execution requires PLAYWRIGHT_AVAILABLE
+        and a successfully-launched browser — there is no in-between simulated state."""
         duration_ms = (datetime.now(timezone.utc) - start_time).total_seconds() * 1000
-        
-        # 90% success rate in simulation
-        if random.random() < 0.9:
-            return SyntheticTestResult(
-                test_id=config.id,
-                test_name=config.name,
-                status="success",
-                duration_ms=round(duration_ms + random.uniform(500, 2000), 2),
-                steps_completed=5,
-                total_steps=5,
-                executed_at=start_time.isoformat(),
-                details={
-                    "mode": "simulated",
-                    "login_url": config.login_url or f"{config.target_url}/login"
-                }
-            )
-        else:
-            return SyntheticTestResult(
-                test_id=config.id,
-                test_name=config.name,
-                status="failed",
-                duration_ms=round(duration_ms + random.uniform(1000, 3000), 2),
-                steps_completed=random.randint(1, 4),
-                total_steps=5,
-                error_message="Simulated failure for testing",
-                executed_at=start_time.isoformat(),
-                details={"mode": "simulated"}
-            )
+        reason = (
+            "Playwright is not installed on this host"
+            if not PLAYWRIGHT_AVAILABLE
+            else "Playwright browser failed to initialize (see server logs)"
+        )
+        return SyntheticTestResult(
+            test_id=config.id,
+            test_name=config.name,
+            status="not_configured",
+            duration_ms=round(duration_ms, 2),
+            steps_completed=0,
+            total_steps=5,
+            error_message=f"{reason} — no test was actually executed, this is not a pass/fail result.",
+            executed_at=start_time.isoformat(),
+            details={"mode": "unavailable"},
+        )
     
     async def run_custom_journey(self, config: SyntheticTestConfig) -> SyntheticTestResult:
         """

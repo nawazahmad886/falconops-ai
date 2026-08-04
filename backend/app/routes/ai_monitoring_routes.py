@@ -93,6 +93,32 @@ async def get_event(event_id: str, user: dict = Depends(require_auth)) -> Dict[s
     return doc
 
 
+class FeedbackRequest(BaseModel):
+    rating: Literal["up", "down"]
+    comment: Optional[str] = Field(None, max_length=1000)
+
+
+@router.post("/events/{event_id}/feedback")
+async def submit_feedback(event_id: str, req: FeedbackRequest, user: dict = Depends(require_auth)) -> Dict[str, Any]:
+    """Real human signal on a specific AI output — the gap the automated LLM-judge
+    quality/hallucination agents can't fill (see ai_monitoring_service.py's module
+    docstring). Ties directly to event_id so bad-answer patterns can be mined from
+    actual usage instead of only synthetic evaluation."""
+    q: Dict[str, Any] = {"id": event_id}
+    tid = _tid(user)
+    if tid:
+        q["tenant_id"] = tid
+    feedback = {
+        "rating": req.rating, "comment": req.comment,
+        "user_id": user.get("id"), "user_email": user.get("email"),
+        "submitted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    result = await db.ai_monitoring_events.update_one(q, {"$set": {"feedback": feedback}})
+    if result.matched_count == 0:
+        raise HTTPException(404, "Event not found")
+    return {"ok": True, "feedback": feedback}
+
+
 @router.get("/dashboard")
 async def dashboard(user: dict = Depends(require_auth),
                     hours: int = Query(24, ge=1, le=720)) -> Dict[str, Any]:
@@ -117,6 +143,12 @@ async def dashboard(user: dict = Depends(require_auth),
             "avg_latency_ms": {"$avg": "$latency_ms"},
             "max_latency_ms": {"$max": "$latency_ms"},
             "errored_count": {"$sum": {"$cond": ["$errored", 1, 0]}},
+            # Mongo's $sum silently treats a missing/null estimated_cost_usd as 0 —
+            # that would make total_cost_usd look complete when it's actually
+            # undercounting calls to unpriced models. Count them separately so
+            # the UI can say so instead of presenting a quietly-wrong total.
+            "unpriced_count": {"$sum": {"$cond": [{"$eq": ["$estimated_cost_usd", None]}, 1, 0]}},
+            "estimated_tokens_count": {"$sum": {"$cond": [{"$eq": ["$tokens_source", "estimated"]}, 1, 0]}},
         }},
     ]).to_list(length=1)
     summary = agg[0] if agg else {}
@@ -175,6 +207,12 @@ async def dashboard(user: dict = Depends(require_auth),
         "tokens": {
             "total": summary.get("total_tokens", 0),
             "cost_usd": round(summary.get("total_cost_usd") or 0, 4),
+            # Honesty flags for the UI: cost_usd above excludes calls to models with
+            # no entry in USD_PER_1K_TOKENS, and "total" may partly be char-count
+            # estimates rather than provider-reported usage — surface both instead
+            # of letting the totals look more precise than they are.
+            "unpriced_events": summary.get("unpriced_count", 0),
+            "estimated_token_events": summary.get("estimated_tokens_count", 0),
         },
         "performance": {
             "avg_latency_ms": round(summary.get("avg_latency_ms") or 0, 1),

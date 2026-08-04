@@ -3,6 +3,7 @@ FalconOps AI - Logs Monitoring Routes
 API endpoints for log ingestion, analysis, and AI-powered insights
 """
 import logging
+import os
 import re
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -33,13 +34,29 @@ logger = logging.getLogger(__name__)
 
 _indexes_ready = False
 
+# Raw log lines are high-volume and low-value once old — same reasoning as
+# metrics_timeseries_service.METRICS_RETENTION_DAYS. Configurable since real
+# retention needs vary by deployment.
+LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "30"))
+
+
+def _log_expires_at() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(days=LOG_RETENTION_DAYS)
+
 
 async def _ensure_indexes() -> None:
     """db.logs had zero indexes anywhere in the running app (the only real
     index-creation code lived in logs_service.py, which nothing imports) — every
     GET /api/logs / /analyze / /deduplicate / /correlate / /anomalies call was a
     full collection scan. Same lazy ensure-once-on-first-write pattern used by
-    ai_monitoring_service/resource_explorer_service/metrics_timeseries_service."""
+    ai_monitoring_service/resource_explorer_service/metrics_timeseries_service.
+
+    Also adds a real full-text index on "message" — the `search` param on
+    GET /api/logs below used to be a non-anchored $regex (couldn't use any
+    index, got slower linearly with collection size); now backed by Mongo's
+    text index, real tokenized/relevance-ranked search. And a TTL index on
+    expires_at (a real BSON Date field set at insert time — "timestamp" is
+    stored as an ISO string throughout this file, which Mongo TTL can't act on)."""
     global _indexes_ready
     if _indexes_ready:
         return
@@ -47,6 +64,8 @@ async def _ensure_indexes() -> None:
         await db.logs.create_index([("timestamp", -1)], name="logs_ts")
         await db.logs.create_index([("tenant_id", 1), ("timestamp", -1)], name="logs_tenant_ts")
         await db.logs.create_index([("service", 1), ("timestamp", -1)], name="logs_service_ts")
+        await db.logs.create_index([("message", "text")], name="logs_message_text")
+        await db.logs.create_index("expires_at", name="logs_ttl", expireAfterSeconds=0)
         _indexes_ready = True
     except Exception:
         logger.warning("logs index creation skipped", exc_info=True)
@@ -103,9 +122,10 @@ async def ingest_log(log: LogEntry, current_user: Optional[dict] = Depends(get_c
         "source": "api",
         "parsed": parsed,
         "tenant_id": _tid(current_user),
-        "created_at": datetime.now(timezone.utc).isoformat()
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "expires_at": _log_expires_at(),
     }
-    
+
     await db.logs.insert_one(log_doc)
     
     return {"id": log_doc["id"], "status": "ingested", "category": log_doc["category"]}
@@ -133,9 +153,10 @@ async def ingest_logs_batch(batch: LogBatchIngest, current_user: Optional[dict] 
             "source": batch.source,
             "parsed": parsed,
             "tenant_id": _tid(current_user),
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": _log_expires_at(),
         }
-        
+
         ingested.append(log_doc)
     
     if ingested:
@@ -162,25 +183,37 @@ async def get_logs(
     current_user: Optional[dict] = Depends(get_current_user)
 ):
     """Get logs with filters"""
+    await _ensure_indexes()
     time_threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
-    
+
     query = {"timestamp": {"$gte": time_threshold.isoformat()}}
     tid = _tid(current_user)
     if tid:
         query["tenant_id"] = tid
-    
+
     if severity:
         query["severity"] = severity
     if service:
         query["service"] = service
     if category:
         query["category"] = category
-    if search:
-        query["message"] = {"$regex": re.escape(search), "$options": "i"}
-    
-    logs = await db.logs.find(query, {"_id": 0}).sort("timestamp", -1).skip(offset).limit(limit).to_list(limit)
+
+    # Real full-text search via the "message" text index (tokenized, stemmed,
+    # relevance-ranked) instead of a non-anchored $regex scan, which could never
+    # use an index and got slower linearly with collection size. Quote the query
+    # for an exact-phrase match (Mongo's $text supports this natively).
+    use_text_search = bool(search)
+    if use_text_search:
+        query["$text"] = {"$search": search}
+
     total = await db.logs.count_documents(query)
-    
+    if use_text_search:
+        cursor = db.logs.find(query, {"_id": 0, "score": {"$meta": "textScore"}}) \
+            .sort([("score", {"$meta": "textScore"}), ("timestamp", -1)])
+    else:
+        cursor = db.logs.find(query, {"_id": 0}).sort("timestamp", -1)
+    logs = await cursor.skip(offset).limit(limit).to_list(limit)
+
     return {
         "logs": logs,
         "total": total,

@@ -8,6 +8,7 @@ import { toast } from 'sonner';
 import {
     Cpu, RefreshCw, Play, Pause, ExternalLink, Activity, Database,
     Server, ScrollText, Network, Settings, ShieldCheck, AlertTriangle, WifiOff, Boxes,
+    HardDriveDownload,
 } from 'lucide-react';
 
 const API = process.env.REACT_APP_BACKEND_URL;
@@ -125,8 +126,10 @@ export default function ControlCenterPage() {
     const [jobs, setJobs] = useState([]);
     const [activity, setActivity] = useState([]);
     const [dependencies, setDependencies] = useState(null);
+    const [backupStatus, setBackupStatus] = useState(null);
     const [loading, setLoading] = useState(true);
     const [busyJob, setBusyJob] = useState(null);
+    const [backupRunning, setBackupRunning] = useState(false);
     // Backend-unreachable resilience: keep the last successfully fetched data
     // on screen (stale-but-informative) instead of blanking the page, and
     // surface a clear banner with when it was last confirmed live.
@@ -135,12 +138,13 @@ export default function ControlCenterPage() {
 
     const fetchAll = useCallback(async () => {
         try {
-            const [ovRes, compRes, jobsRes, activityRes, depsRes] = await Promise.all([
+            const [ovRes, compRes, jobsRes, activityRes, depsRes, backupRes] = await Promise.all([
                 fetch(`${API}/api/control-center/overview`, { headers: authHeaders() }),
                 fetch(`${API}/api/control-center/components`, { headers: authHeaders() }),
                 fetch(`${API}/api/control-center/jobs`, { headers: authHeaders() }),
                 fetch(`${API}/api/control-center/activity?limit=60`, { headers: authHeaders() }),
                 fetch(`${API}/api/control-center/dependencies`, { headers: authHeaders() }),
+                fetch(`${API}/api/backup/status`, { headers: authHeaders() }),
             ]);
             // Any of these resolving (even 401/500, i.e. a real HTTP response) means the
             // backend process itself is reachable — only a network-level failure (thrown
@@ -150,6 +154,7 @@ export default function ControlCenterPage() {
             if (jobsRes.ok) setJobs((await jobsRes.json()).jobs || []);
             if (activityRes.ok) setActivity((await activityRes.json()).events || []);
             if (depsRes.ok) setDependencies(await depsRes.json());
+            if (backupRes.ok) setBackupStatus(await backupRes.json());
             setBackendUnreachable(false);
             setLastUpdated(new Date());
         } catch (e) {
@@ -196,6 +201,21 @@ export default function ControlCenterPage() {
             toast.error(`Resume failed: ${e.message?.slice(0, 200)}`);
         } finally {
             setBusyJob(null);
+        }
+    };
+
+    const handleRunBackup = async () => {
+        setBackupRunning(true);
+        try {
+            const r = await fetch(`${API}/api/backup/run`, { method: 'POST', headers: authHeaders() });
+            const result = await r.json();
+            if (!r.ok || result.ok === false) throw new Error(result.error || 'backup failed');
+            toast.success(`Backup completed (${result.size_bytes ? Math.round(result.size_bytes / 1024 / 1024) + 'MB' : ''})`);
+            fetchAll();
+        } catch (e) {
+            toast.error(`Backup failed: ${e.message?.slice(0, 200)}`);
+        } finally {
+            setBackupRunning(false);
         }
     };
 
@@ -296,6 +316,54 @@ export default function ControlCenterPage() {
                     </CardContent>
                 </Card>
             </div>
+
+            <Card className="bg-black/40 border-white/10">
+                <CardHeader className="pb-2 flex-row items-center justify-between space-y-0">
+                    <div>
+                        <CardTitle className="text-sm flex items-center gap-2 text-white">
+                            <HardDriveDownload className="w-4 h-4 text-emerald-400" /> Database Backups
+                        </CardTitle>
+                        <p className="text-[11px] text-white/40 mt-1">
+                            Real scheduled mongodump — creates the backup, doesn't restore. Restore stays the documented manual mongorestore procedure (see Admin Guide).
+                        </p>
+                    </div>
+                    {isAdmin && (
+                        <Button size="sm" variant="outline" disabled={backupRunning} onClick={handleRunBackup} data-testid="run-backup-now">
+                            <HardDriveDownload className={`w-3.5 h-3.5 mr-1.5 ${backupRunning ? 'animate-pulse' : ''}`} /> {backupRunning ? 'Running…' : 'Run Backup Now'}
+                        </Button>
+                    )}
+                </CardHeader>
+                <CardContent className="p-4">
+                    {!backupStatus ? (
+                        <div className="text-xs text-white/40">Loading…</div>
+                    ) : !backupStatus.configured ? (
+                        <div className="text-xs text-red-300 bg-red-500/10 border border-red-500/20 rounded p-2">
+                            mongodump is not installed on this host — the scheduler is running but every attempt fails. See backup_service.py / Dockerfile.
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-[12px]">
+                            <div>
+                                <p className="text-white/40 text-[10px] uppercase">Last Attempt</p>
+                                <p className={backupStatus.last_attempt?.ok ? 'text-emerald-300' : 'text-red-300'}>
+                                    {backupStatus.last_attempt ? (backupStatus.last_attempt.ok ? 'Succeeded' : 'Failed') : 'None yet'}
+                                </p>
+                            </div>
+                            <div>
+                                <p className="text-white/40 text-[10px] uppercase">When</p>
+                                <p className="text-white/70">{(backupStatus.last_attempt?.started_at || '').replace('T', ' ').slice(0, 19) || '—'}</p>
+                            </div>
+                            <div>
+                                <p className="text-white/40 text-[10px] uppercase">Interval</p>
+                                <p className="text-white/70">Every {backupStatus.interval_hours}h · keep last {backupStatus.retention_count}</p>
+                            </div>
+                            <div>
+                                <p className="text-white/40 text-[10px] uppercase">Location</p>
+                                <p className="text-white/70 truncate" title={backupStatus.backup_dir}>{backupStatus.backup_dir}</p>
+                            </div>
+                        </div>
+                    )}
+                </CardContent>
+            </Card>
 
             <Card className="bg-black/40 border-white/10">
                 <CardHeader className="pb-2">

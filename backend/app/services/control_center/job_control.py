@@ -42,6 +42,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from ..autonomous_ops_orchestrator import sla_breach_scheduler
+from ..backup_service import backup_loop
 from ..compliance_service import compliance_snapshot_scheduler
 from ..kafka_pipeline import consumer as kafka_consumer
 from ..metrics_timeseries_service import metrics_timeseries_service
@@ -142,6 +143,8 @@ JOB_REGISTRY: List[Dict[str, Any]] = [
      "resolver": lambda: importlib.import_module("app.services.weekly_report_scheduler_service")._scheduler},
     {"id": WATCHDOG_JOB_ID, "label": "Job Watchdog (auto-restart)", "kind": "asyncio_task",
      "attr": "job_watchdog_task", "factory": lambda: watchdog_loop()},
+    {"id": "backup_scheduler", "label": "Database Backup Scheduler", "kind": "asyncio_task",
+     "attr": "backup_scheduler_task", "factory": lambda: backup_loop()},
 ]
 
 _JOBS_BY_ID = {j["id"]: j for j in JOB_REGISTRY}

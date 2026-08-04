@@ -655,9 +655,25 @@ pip3 install --quiet requests pyyaml 2>/dev/null || pip install --quiet requests
 if [ "{db_type}" = "postgres" ] || [ "{db_type}" = "postgresql" ]; then
     pip3 install --quiet psycopg2-binary 2>/dev/null || pip install --quiet psycopg2-binary
 elif [ "{db_type}" = "oracle" ]; then
+    # python-oracledb runs in "thin" mode by default — talks the Oracle wire
+    # protocol directly, no Oracle Instant Client install needed.
     pip3 install --quiet oracledb 2>/dev/null || pip install --quiet oracledb
 elif [ "{db_type}" = "mysql" ]; then
     pip3 install --quiet pymysql 2>/dev/null || pip install --quiet pymysql
+elif [ "{db_type}" = "sqlserver" ] || [ "{db_type}" = "mssql" ]; then
+    # pyodbc needs a real native ODBC driver on this host, unlike the other
+    # three engines — install Microsoft's msodbcsql18 package first.
+    if command -v apt-get >/dev/null 2>&1; then
+        curl -sSL https://packages.microsoft.com/keys/microsoft.asc | apt-key add - 2>/dev/null || true
+        curl -sSL https://packages.microsoft.com/config/ubuntu/22.04/prod.list -o /etc/apt/sources.list.d/mssql-release.list 2>/dev/null || true
+        apt-get update -qq && ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc-dev
+    elif command -v yum >/dev/null 2>&1; then
+        curl -sSL https://packages.microsoft.com/config/rhel/9/prod.repo -o /etc/yum.repos.d/mssql-release.repo 2>/dev/null || true
+        ACCEPT_EULA=Y yum install -y -q msodbcsql18 unixODBC-devel
+    else
+        echo "  WARNING: unrecognized package manager — install the 'msodbcsql18' ODBC driver manually: https://learn.microsoft.com/sql/connect/odbc/linux-mac/installing-the-microsoft-odbc-driver-for-sql-server"
+    fi
+    pip3 install --quiet pyodbc 2>/dev/null || pip install --quiet pyodbc
 fi
 echo "  Done."
 
@@ -918,15 +934,21 @@ def _calculate_avg_metrics(metrics: list) -> dict:
 
 
 def _calc_db_health(metrics: dict, sq_count: int, lock_count: int) -> float:
+    # cpu_usage/memory_usage are genuinely None (not 0) for engines/permission
+    # levels where the agent can't obtain them (e.g. Postgres/MySQL have no
+    # SQL-only path to host CPU) — skip that component of the score rather
+    # than silently treating "unknown" as "0%, perfectly healthy".
     score = 100.0
-    cpu = metrics.get("cpu_usage", 0)
-    mem = metrics.get("memory_usage", 0)
-    sessions = metrics.get("active_sessions", 0)
-    if cpu > 90: score -= 30
-    elif cpu > 70: score -= 15
-    elif cpu > 50: score -= 5
-    if mem > 90: score -= 25
-    elif mem > 70: score -= 10
+    cpu = metrics.get("cpu_usage")
+    mem = metrics.get("memory_usage")
+    sessions = metrics.get("active_sessions") or 0
+    if cpu is not None:
+        if cpu > 90: score -= 30
+        elif cpu > 70: score -= 15
+        elif cpu > 50: score -= 5
+    if mem is not None:
+        if mem > 90: score -= 25
+        elif mem > 70: score -= 10
     if sessions > 500: score -= 20
     elif sessions > 200: score -= 10
     if sq_count > 10: score -= 15

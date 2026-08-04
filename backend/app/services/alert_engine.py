@@ -2,12 +2,38 @@
 FalconOps AI - Enterprise Alert Engine
 Alert lifecycle management with severity levels and state transitions
 """
+import logging
 import uuid
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 from enum import Enum
 from ..core.database import db
+
+logger = logging.getLogger(__name__)
+
+# No TTL here, deliberately — alerts feed incident correlation, audit, and
+# postmortem history, unlike raw metrics/logs which are safe to auto-expire (see
+# metrics_timeseries_service.METRICS_RETENTION_DAYS / logs_service.LOG_RETENTION_DAYS).
+# Only indexes, so this genuinely growing collection stays fast to query.
+_indexes_ready = False
+
+
+async def _ensure_indexes() -> None:
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        # Covers get_alerts's {tenant_id, status, created_at} and get_active_alerts's
+        # {tenant_id, status} (a prefix of the same index).
+        await db.alerts_engine.create_index(
+            [("tenant_id", 1), ("status", 1), ("created_at", -1)], name="alerts_tenant_status_created")
+        # Covers create_alert's duplicate-active-alert lookup.
+        await db.alerts_engine.create_index(
+            [("entity_id", 1), ("metric_name", 1), ("status", 1)], name="alerts_entity_metric_status")
+        _indexes_ready = True
+    except Exception as e:
+        logger.warning("alerts_engine index creation skipped: %s", e)
 
 
 async def _evaluate_workflow_triggers(alert: Dict):
@@ -104,9 +130,10 @@ class AlertEngine:
         auto_resolve_minutes: Optional[int] = None
     ) -> Dict:
         """Create a new alert"""
+        await _ensure_indexes()
         alert_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        
+
         # Check for duplicate active alerts (same entity + metric)
         existing = await db.alerts_engine.find_one({
             "entity_id": entity_id,

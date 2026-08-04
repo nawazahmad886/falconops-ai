@@ -211,6 +211,21 @@ async def send_chat_message(session_id: Optional[str], user: Dict, text: str) ->
             kinds=["chat_message", "ai_insight"],
         )
         rag_block = vector_memory_service.format_for_prompt(memories)
+        # Persist what was actually retrieved (query, hit count, per-hit similarity/kind) —
+        # previously this only existed as a formatted string inside the LLM prompt, with no
+        # queryable trail. session_id ties this back to the ai_monitoring_events row this
+        # exchange also produces (see llm_provider_service's auto-instrumentation), so a bad
+        # answer can be traced back to "did retrieval even find anything relevant."
+        try:
+            await db.rag_retrieval_log.insert_one({
+                "session_id": sid, "user_id": user["id"], "query": text[:500],
+                "hit_count": len(memories),
+                "hits": [{"kind": m.get("kind"), "score": m.get("score"), "source_id": m.get("source_id")}
+                         for m in memories],
+                "at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass  # observability write must never break the actual chat response
     except Exception as e:
         logger.debug("vector recall failed (non-fatal): %s", e)
         memories = []

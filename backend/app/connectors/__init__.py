@@ -12,3 +12,5 @@ never create an import cycle with the rest of the app.
 from . import registry  # noqa: F401
 from .prometheus import connector as _prometheus_connector  # noqa: F401
 from .aws import connector as _aws_connector  # noqa: F401
+from .azure import connector as _azure_connector  # noqa: F401
+from .gcp import connector as _gcp_connector  # noqa: F401

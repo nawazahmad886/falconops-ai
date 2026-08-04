@@ -2,11 +2,47 @@
 FalconOps AI - Logs Service
 Log ingestion, storage, and searching for observability
 """
+import os
 import uuid
 import re
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any
 from ..core.database import db
+
+logger = logging.getLogger(__name__)
+
+# Same reasoning as metrics_timeseries_service's METRICS_RETENTION_DAYS — raw log
+# lines are high-volume and low-value once old; genuinely safe to auto-expire
+# (unlike alerts/incidents, kept indefinitely).
+LOG_RETENTION_DAYS = int(os.environ.get("LOG_RETENTION_DAYS", "30"))
+
+_indexes_ready = False
+
+
+def _log_expires_at() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(days=LOG_RETENTION_DAYS)
+
+
+async def _ensure_indexes() -> None:
+    """db.logs had zero indexes — every search_logs() call (the whole point of a
+    logs page) was a full collection scan, and the message-text search was a
+    non-anchored regex on top of that (can't use any index at all). Adds real
+    filter indexes plus a MongoDB text index so keyword search becomes an actual
+    inverted-index lookup instead of scanning every document's message field."""
+    global _indexes_ready
+    if _indexes_ready:
+        return
+    try:
+        await db.logs.create_index([("tenant_id", 1), ("timestamp", -1)], name="logs_tenant_ts")
+        await db.logs.create_index([("service", 1), ("timestamp", -1)], name="logs_service_ts")
+        await db.logs.create_index([("level", 1), ("timestamp", -1)], name="logs_level_ts")
+        await db.logs.create_index([("trace_id", 1)], name="logs_trace_id")
+        await db.logs.create_index([("message", "text")], name="logs_message_text")
+        await db.logs.create_index("expires_at", name="logs_ttl", expireAfterSeconds=0)
+        _indexes_ready = True
+    except Exception as e:
+        logger.warning("logs index creation skipped: %s", e)
 
 # Log levels
 LOG_LEVELS = [
@@ -48,12 +84,13 @@ class LogsService:
         tenant_id: Optional[str] = None
     ) -> Dict:
         """Ingest a single log entry"""
+        await _ensure_indexes()
         log_id = str(uuid.uuid4())
         ts = timestamp or datetime.now(timezone.utc).isoformat()
-        
+
         # Extract structured fields from message
         extracted = self._extract_fields(message)
-        
+
         log_doc = {
             "id": log_id,
             "message": message,
@@ -67,9 +104,10 @@ class LogsService:
             "metadata": metadata or {},
             "extracted_fields": extracted,
             "tenant_id": tenant_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": _log_expires_at(),
         }
-        
+
         await db.logs.insert_one(log_doc)
         return {k: v for k, v in log_doc.items() if k != "_id"}
     
@@ -79,13 +117,14 @@ class LogsService:
         tenant_id: Optional[str] = None
     ) -> Dict:
         """Ingest multiple log entries at once"""
+        await _ensure_indexes()
         docs = []
         now = datetime.now(timezone.utc).isoformat()
-        
+
         for log in logs:
             message = log.get("message", "")
             extracted = self._extract_fields(message)
-            
+
             doc = {
                 "id": str(uuid.uuid4()),
                 "message": message,
@@ -99,7 +138,8 @@ class LogsService:
                 "metadata": log.get("metadata", {}),
                 "extracted_fields": extracted,
                 "tenant_id": tenant_id,
-                "created_at": now
+                "created_at": now,
+                "expires_at": _log_expires_at(),
             }
             docs.append(doc)
         
@@ -164,21 +204,28 @@ class LogsService:
         sort_order: str = "desc"
     ) -> Dict:
         """Search logs with various filters"""
+        await _ensure_indexes()
         mongo_query = {}
-        
+
         if tenant_id:
             mongo_query["tenant_id"] = tenant_id
-        
-        # Text search in message
-        if query:
-            mongo_query["message"] = {"$regex": re.escape(query), "$options": "i"}
-        
+
+        # Real full-text search via the "message" text index (tokenized, stemmed,
+        # relevance-ranked) instead of a non-anchored $regex scan — the regex could
+        # never use an index and got slower linearly with collection size. Wrap the
+        # query in quotes for an exact-phrase match (Mongo's $text supports this
+        # natively); unquoted terms are OR'd together and ranked by relevance, which
+        # is a real semantic change from "substring anywhere" — documented, not hidden.
+        use_text_search = bool(query)
+        if use_text_search:
+            mongo_query["$text"] = {"$search": query}
+
         # Level filter
         if level:
             mongo_query["level"] = level.lower()
         elif levels:
             mongo_query["level"] = {"$in": [l.lower() for l in levels]}
-        
+
         if source:
             mongo_query["source"] = source
         if service:
@@ -187,7 +234,7 @@ class LogsService:
             mongo_query["host"] = host
         if trace_id:
             mongo_query["trace_id"] = trace_id
-        
+
         # Time range
         if start_time or end_time:
             mongo_query["timestamp"] = {}
@@ -195,15 +242,23 @@ class LogsService:
                 mongo_query["timestamp"]["$gte"] = start_time
             if end_time:
                 mongo_query["timestamp"]["$lte"] = end_time
-        
+
         # Execute query
         sort_dir = -1 if sort_order == "desc" else 1
         total = await db.logs.count_documents(mongo_query)
-        
-        logs = await db.logs.find(
-            mongo_query, {"_id": 0}
-        ).sort("timestamp", sort_dir).skip(offset).limit(limit).to_list(limit)
-        
+
+        if use_text_search:
+            # Mongo requires the textScore meta field to be present in the projection
+            # for a sort to reference it — not just computed internally.
+            cursor = db.logs.find(mongo_query, {"_id": 0, "score": {"$meta": "textScore"}})
+            # Relevance first, recency as tiebreaker — a keyword match from 2 minutes
+            # ago and one from 2 weeks ago aren't equally relevant just because the
+            # older one sorts first under a pure timestamp sort.
+            cursor = cursor.sort([("score", {"$meta": "textScore"}), ("timestamp", sort_dir)])
+        else:
+            cursor = db.logs.find(mongo_query, {"_id": 0}).sort("timestamp", sort_dir)
+        logs = await cursor.skip(offset).limit(limit).to_list(limit)
+
         return {
             "logs": logs,
             "total": total,

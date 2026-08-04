@@ -2,11 +2,14 @@
 FalconOps AI - Capacity Prediction Engine
 AI-powered capacity forecasting and trend analysis
 """
+import logging
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, List, Any, Tuple
 from scipy import stats
 from ..core.database import db
+
+logger = logging.getLogger(__name__)
 
 # Try to import sklearn for advanced predictions
 try:
@@ -15,6 +18,23 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     SKLEARN_AVAILABLE = False
+
+# statsmodels was already a dependency (requirements.txt) but unused anywhere in
+# the codebase — real seasonality-aware forecasting (Holt-Winters triple
+# exponential smoothing) instead of the single-line linregress() trend fit below,
+# which has no concept of daily/weekly cycles at all.
+try:
+    import pandas as pd
+    from statsmodels.tsa.holtwinters import ExponentialSmoothing
+    SEASONAL_FORECAST_AVAILABLE = True
+except ImportError:
+    SEASONAL_FORECAST_AVAILABLE = False
+
+# Hourly-resampled data needs at least this many full 24h cycles before Holt-Winters'
+# seasonal component is fit on more than noise. Below this, honestly fall back to
+# the linear trend fit rather than fitting a seasonal model to ~1 cycle of data.
+MIN_SEASONAL_PERIODS = 2
+SEASONAL_PERIOD_HOURS = 24
 
 
 class CapacityPredictionEngine:
@@ -103,22 +123,37 @@ class CapacityPredictionEngine:
         std_value = np.std(values)
         trend = self._calculate_trend(timestamps, values)
         
-        # Predict using linear regression
         prediction_minutes = self.prediction_horizons.get(horizon, 1440)
-        predicted_value, time_to_threshold, confidence = self._predict_linear(
-            timestamps, values, prediction_minutes, threshold
-        )
-        
-        # Calculate prediction bounds
-        lower_bound, upper_bound = self._calculate_prediction_bounds(
-            values, predicted_value, std_value
-        )
-        
-        # Generate forecast series
-        forecast_series = self._generate_forecast_series(
-            timestamps, values, prediction_minutes, base_time
-        )
-        
+
+        # Try real seasonality-aware forecasting first (Holt-Winters); falls back to
+        # the linear-regression fit below when there isn't enough data for a
+        # seasonal model, or statsmodels/pandas aren't installed — forecast_method
+        # on the result says honestly which one actually ran, never claims
+        # "seasonal" when it silently fell back.
+        seasonal_result = None
+        if SEASONAL_FORECAST_AVAILABLE:
+            seasonal_result = self._predict_seasonal(data, prediction_minutes, threshold, base_time)
+
+        if seasonal_result is not None:
+            predicted_value = seasonal_result["predicted_value"]
+            time_to_threshold = seasonal_result["time_to_threshold"]
+            confidence = seasonal_result["confidence"]
+            forecast_series = seasonal_result["forecast_series"]
+            lower_bound = seasonal_result["lower_bound"]
+            upper_bound = seasonal_result["upper_bound"]
+            forecast_method = "seasonal_holt_winters"
+        else:
+            predicted_value, time_to_threshold, confidence = self._predict_linear(
+                timestamps, values, prediction_minutes, threshold
+            )
+            lower_bound, upper_bound = self._calculate_prediction_bounds(
+                values, predicted_value, std_value
+            )
+            forecast_series = self._generate_forecast_series(
+                timestamps, values, prediction_minutes, base_time
+            )
+            forecast_method = "linear_regression"
+
         # Determine risk level
         risk_level, risk_message = self._assess_risk(
             current_value, predicted_value, threshold, time_to_threshold
@@ -136,6 +171,7 @@ class CapacityPredictionEngine:
             "prediction": {
                 "horizon": horizon,
                 "horizon_minutes": prediction_minutes,
+                "forecast_method": forecast_method,
                 "predicted_value": float(round(predicted_value, 2)),
                 "lower_bound": float(round(lower_bound, 2)),
                 "upper_bound": float(round(upper_bound, 2)),
@@ -216,9 +252,96 @@ class CapacityPredictionEngine:
         
         # Confidence based on R-squared
         confidence = float(max(0, min(1, r_value ** 2)))
-        
+
         return float(predicted_value), time_to_threshold, confidence
-    
+
+    def _predict_seasonal(
+        self,
+        data: List[Dict],
+        prediction_minutes: int,
+        threshold: float,
+        base_time: datetime,
+    ) -> Optional[Dict[str, Any]]:
+        """Real seasonality-aware forecast via Holt-Winters triple exponential
+        smoothing (statsmodels) — captures a daily cycle (SEASONAL_PERIOD_HOURS),
+        unlike the single straight-line linregress() fit in _predict_linear.
+        Returns None (caller falls back to linear) when there isn't enough data
+        for at least MIN_SEASONAL_PERIODS full cycles — fitting a seasonal model
+        on ~1 cycle of data would be fitting noise, not a real pattern."""
+        try:
+            df = pd.DataFrame(data)
+            df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+            series = df.set_index("timestamp")["value"].sort_index()
+            # Irregular raw points -> regular hourly grid (Holt-Winters' seasonal_periods
+            # is a positional offset, not aware of the DatetimeIndex's actual spacing —
+            # any row DROPPED here would silently misalign "24 steps back" from "24 hours
+            # back". So gaps are always FILLED (interpolate, then ffill/bfill for any
+            # edges interpolate can't reach), never dropped — the index stays perfectly
+            # regular. If too much of the series had to be filled, the seasonal pattern
+            # would mostly be interpolated fiction, not real data — bail out to linear.
+            resampled = series.resample("1h").mean()
+            gap_fraction = resampled.isna().sum() / max(len(resampled), 1)
+            if gap_fraction > 0.2:
+                return None
+            hourly = resampled.interpolate(limit=3).ffill().bfill()
+            if len(hourly) < MIN_SEASONAL_PERIODS * SEASONAL_PERIOD_HOURS:
+                return None
+
+            fit = ExponentialSmoothing(
+                hourly, trend="add", seasonal="add",
+                seasonal_periods=SEASONAL_PERIOD_HOURS, initialization_method="estimated",
+            ).fit()
+
+            steps = max(1, round(prediction_minutes / 60))
+            # Cap the walk-forward search for a threshold crossing at 30 days —
+            # a metric that won't cross within a month isn't a near-term capacity risk.
+            max_lookout_steps = max(steps, 24 * 30)
+            forecast = fit.forecast(max_lookout_steps)
+
+            resid_std = float(np.std(fit.resid)) if len(fit.resid) else float(hourly.std())
+            data_std = float(hourly.std()) or 1e-9
+            # A real (if simplified) confidence measure: how much of the data's
+            # own variance the fitted model's residuals still contain — not a
+            # simulated prediction interval (statsmodels' ETS confidence intervals
+            # need the newer ETSModel API), but derived from the actual fit, not guessed.
+            confidence = float(max(0.0, min(1.0, 1 - (resid_std / data_std))))
+
+            predicted_value = float(forecast.iloc[steps - 1])
+            last_value = float(hourly.iloc[-1])
+
+            time_to_threshold = None
+            for i, val in enumerate(forecast.values, start=1):
+                crossed = (last_value < threshold <= val) or (last_value > threshold >= val)
+                if crossed:
+                    time_to_threshold = float(i * 60)  # minutes
+                    break
+
+            forecast_series = []
+            for i in range(steps + 1):
+                idx = min(i, len(forecast) - 1)
+                val = float(hourly.iloc[-1]) if i == 0 else float(forecast.iloc[idx])
+                ts = hourly.index[-1] if i == 0 else forecast.index[idx]
+                margin = 2 * resid_std * (1 + i / max(steps, 1)) ** 0.5  # widen with horizon — real, not arbitrary
+                forecast_series.append({
+                    "timestamp": ts.isoformat(),
+                    "value": round(val, 2),
+                    "lower_bound": round(max(0, val - margin), 2),
+                    "upper_bound": round(val + margin, 2),
+                })
+
+            final_margin = 2 * resid_std * (1 + steps / max(steps, 1)) ** 0.5
+            return {
+                "predicted_value": predicted_value,
+                "time_to_threshold": time_to_threshold,
+                "confidence": confidence,
+                "lower_bound": max(0.0, predicted_value - final_margin),
+                "upper_bound": predicted_value + final_margin,
+                "forecast_series": forecast_series,
+            }
+        except Exception as e:
+            logger.warning(f"seasonal forecast failed, falling back to linear: {e}")
+            return None
+
     def _calculate_prediction_bounds(
         self,
         values: np.ndarray,
