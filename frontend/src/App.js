@@ -105,6 +105,8 @@ import AIMonitoringPage from './pages/AIMonitoringPage';
 import AIObservabilityPage from './pages/AIObservabilityPage';
 import AskFalconOpsPage from './pages/AskFalconOpsPage';
 import OneAgentFleetPage from './pages/OneAgentFleetPage';
+import OneAgentExplorerPage from './pages/OneAgentExplorerPage';
+import LLMObservabilityPage from './pages/LLMObservabilityPage';
 import { EnterpriseLayout } from './layouts/EnterpriseLayout';
 import './App.css';
 
@@ -933,6 +935,22 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <OneAgentFleetPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/oneagent-explorer"
+                element={
+                    <ProtectedRoute>
+                        <OneAgentExplorerPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/llm-observability"
+                element={
+                    <ProtectedRoute>
+                        <LLMObservabilityPage />
                     </ProtectedRoute>
                 }
             />

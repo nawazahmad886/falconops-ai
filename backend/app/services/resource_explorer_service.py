@@ -47,6 +47,8 @@ class ResourceCategory(str, Enum):
     NETWORK = "network"
     STORAGE = "storage"
     SECURITY = "security"
+    PROCESS = "process"
+    CONTAINER = "container"
     OTHER = "other"
 
 
@@ -290,6 +292,152 @@ async def _sync_databases() -> Dict[str, int]:
     return {"created": created, "updated": updated}
 
 
+async def _upsert_runs_on_edge(source_node_id: str, target_node_id: str) -> None:
+    """Idempotent — create_connection() (topology_service.py) always inserts a
+    new doc with no dedup, which would duplicate an edge every 60s tick; this
+    bridge needs upsert semantics instead, same idiom as the node upserts
+    above, applied directly to db.topology_edges."""
+    now = datetime.now(timezone.utc).isoformat()
+    await db.topology_edges.update_one(
+        {"source_id": source_node_id, "target_id": target_node_id, "type": "runs_on"},
+        {"$set": {"status": "healthy", "updated_at": now},
+         "$setOnInsert": {"id": str(uuid.uuid4()), "protocol": None, "metrics": {}, "tenant_id": None, "created_at": now}},
+        upsert=True,
+    )
+
+
+async def _sync_processes_and_containers() -> Dict[str, int]:
+    """Walks db.oneagent_agents.services[] (now carrying pid/container_id/ports
+    per service, see oneagent_routes.py::ingest_heartbeat) into Process and
+    Container FalconGraph nodes, each with a real 'runs_on' edge back to its
+    parent host — closing the gap where OneAgent already discovered processes
+    but nothing turned that into a graph node. Processes/containers have no
+    heartbeat of their own; lifecycle is inherited from the parent host's
+    last_seen, same staleness window _sync_hosts() already uses."""
+    agents = await db.oneagent_agents.find({}, {"_id": 0}).to_list(2000)
+    created = 0
+    updated = 0
+
+    for ag in agents:
+        host_key = (ag.get("host") or "").strip().lower()
+        if not host_key:
+            continue
+        host_node = await db.topology_nodes.find_one(
+            {"source_ref.collection": "host", "source_ref.id": host_key}, {"_id": 0, "id": 1}
+        )
+        if not host_node:
+            continue  # host node hasn't been bridged yet this tick — will catch up next tick
+
+        age = _seconds_since(ag.get("last_seen"))
+        lifecycle_status = (
+            LifecycleStatus.MONITORED.value if age is not None and age <= HEARTBEAT_STALE_AFTER_SECONDS
+            else LifecycleStatus.UNREACHABLE.value
+        )
+        environment = ag.get("environment") or "production"
+
+        container_nodes: Dict[str, str] = {}  # container_id -> topology node id, this host only
+        for svc in ag.get("services") or []:
+            name = svc.get("name")
+            pid = svc.get("pid")
+            if not name or pid is None:
+                continue  # pre-V2 heartbeat shape ({name, runtime} only) — nothing to bridge yet for this entry
+            container_id = svc.get("container_id")
+
+            container_node_id = None
+            if container_id:
+                if container_id in container_nodes:
+                    container_node_id = container_nodes[container_id]
+                else:
+                    container_node_id, container_created = await _upsert_container_node(
+                        host_key, container_id, environment, lifecycle_status, host_node["id"],
+                    )
+                    container_nodes[container_id] = container_node_id
+                    created += 1 if container_created else 0
+
+            process_source_id = f"{host_key}:{pid}"
+            existing = await db.topology_nodes.find_one(
+                {"source_ref.collection": "oneagent_process", "source_ref.id": process_source_id}, {"_id": 0}
+            )
+            doc_updates = {
+                "name": name,
+                "type": existing.get("type") if existing else "external",
+                "resource_category": ResourceCategory.PROCESS.value,
+                "technology": svc.get("runtime"),
+                "environment": environment,
+                "lifecycle_status": lifecycle_status,
+                "status": "healthy" if lifecycle_status == LifecycleStatus.MONITORED.value else "critical",
+                "health_score": existing.get("health_score") if existing else 100,
+                "discovered_by": "bridge:oneagent_agents.services",
+                "source_refs": [{"collection": "oneagent_agents", "id": ag.get("id")}],
+                "tags": [],
+                "metadata": {"pid": pid, "runtime": svc.get("runtime"), "container_id": container_id,
+                              "ports": svc.get("ports") or [], "host": host_key},
+                "last_seen": ag.get("last_seen"),
+                "tenant_id": None,
+            }
+            if existing:
+                await db.topology_nodes.update_one(
+                    {"id": existing["id"]}, {"$set": {**doc_updates, "updated_at": datetime.now(timezone.utc).isoformat()}}
+                )
+                process_node_id = existing["id"]
+                updated += 1
+            else:
+                process_node_id = str(uuid.uuid4())
+                now = datetime.now(timezone.utc).isoformat()
+                await db.topology_nodes.insert_one({
+                    "id": process_node_id, "owner": None, "description": None, "created_at": now,
+                    "source_ref": {"collection": "oneagent_process", "id": process_source_id},
+                    **doc_updates,
+                })
+                created += 1
+
+            await _upsert_runs_on_edge(process_node_id, container_node_id or host_node["id"])
+
+    return {"created": created, "updated": updated}
+
+
+async def _upsert_container_node(
+    host_key: str, container_id: str, environment: str, lifecycle_status: str, host_node_id: str,
+) -> "tuple[str, bool]":
+    source_id = f"{host_key}:{container_id}"
+    existing = await db.topology_nodes.find_one(
+        {"source_ref.collection": "oneagent_container", "source_ref.id": source_id}, {"_id": 0}
+    )
+    doc_updates = {
+        "name": container_id,
+        "type": existing.get("type") if existing else "external",
+        "resource_category": ResourceCategory.CONTAINER.value,
+        "technology": "container",
+        "environment": environment,
+        "lifecycle_status": lifecycle_status,
+        "status": "healthy" if lifecycle_status == LifecycleStatus.MONITORED.value else "critical",
+        "health_score": existing.get("health_score") if existing else 100,
+        "discovered_by": "bridge:oneagent_agents.services",
+        "source_refs": [],
+        "tags": [],
+        "metadata": {"container_id": container_id, "host": host_key},
+        "last_seen": datetime.now(timezone.utc).isoformat(),
+        "tenant_id": None,
+    }
+    created = False
+    if existing:
+        await db.topology_nodes.update_one(
+            {"id": existing["id"]}, {"$set": {**doc_updates, "updated_at": datetime.now(timezone.utc).isoformat()}}
+        )
+        node_id = existing["id"]
+    else:
+        node_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        await db.topology_nodes.insert_one({
+            "id": node_id, "owner": None, "description": None, "created_at": now,
+            "source_ref": {"collection": "oneagent_container", "id": source_id},
+            **doc_updates,
+        })
+        created = True
+    await _upsert_runs_on_edge(node_id, host_node_id)
+    return node_id, created
+
+
 async def upsert_from_connector_inventory(item: Dict[str, Any], connector_id: str, tenant_id: Optional[str] = None) -> Dict[str, Any]:
     """Forward-looking hook for the Connector SDK's InventoryCapable mixin — no
     connector implements it yet. Expected item shape: {"resource_id"|"id", "name",
@@ -348,7 +496,11 @@ async def sync_all_resources() -> Dict[str, Any]:
     await _ensure_indexes()
     hosts_result = await _sync_hosts()
     db_result = await _sync_databases()
-    if sum(hosts_result.values()) + sum(db_result.values()) > 0:
+    # Runs after hosts so each host's topology node already exists to link
+    # process/container 'runs_on' edges against — see the "host node hasn't
+    # been bridged yet this tick" skip inside _sync_processes_and_containers.
+    proc_result = await _sync_processes_and_containers()
+    if sum(hosts_result.values()) + sum(db_result.values()) + sum(proc_result.values()) > 0:
         try:
             from .resource_explorer_broadcaster import broadcast_resource_event
             await broadcast_resource_event(
@@ -356,7 +508,7 @@ async def sync_all_resources() -> Dict[str, Any]:
             )
         except Exception:
             pass
-    return {"hosts": hosts_result, "databases": db_result}
+    return {"hosts": hosts_result, "databases": db_result, "processes_and_containers": proc_result}
 
 
 async def resource_bridge_scheduler():

@@ -52,31 +52,16 @@ AI_MONITORING_RETENTION_DAYS = int(os.environ.get("AI_MONITORING_RETENTION_DAYS"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# $-per-1k-tokens, split input/output (blended rates hide the fact that output
-# is typically priced several times higher than input — this table doesn't).
-# Manually maintained — there is no live pricing API wired in. Update when a
-# provider changes pricing; if a model isn't listed, cost_agent returns
-# estimated_cost_usd=None rather than silently guessing a rate (see below).
-# ─────────────────────────────────────────────────────────────────────────────
-USD_PER_1K_TOKENS = {
-    "claude-sonnet-4-5-20250929": {"input": 0.0030, "output": 0.0150},
-    "claude-sonnet-4-5": {"input": 0.0030, "output": 0.0150},
-    "gpt-4o": {"input": 0.0025, "output": 0.0100},
-    "gpt-4o-mini": {"input": 0.00015, "output": 0.00060},
-    "gemini-2.5-pro": {"input": 0.00125, "output": 0.00500},
-    "gemini-1.5-flash": {"input": 0.000075, "output": 0.00030},
-    "ollama": {"input": 0.0, "output": 0.0},
-    "rule_based": {"input": 0.0, "output": 0.0},
-}
-
-
-def _cost_for(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
-    """Real per-model input/output pricing, or None if the model isn't in the
-    table — never a fabricated default rate for an unrecognized model."""
-    rates = USD_PER_1K_TOKENS.get(model)
-    if rates is None:
-        return None
-    return round((input_tokens * rates["input"] + output_tokens * rates["output"]) / 1000.0, 6)
+# Pricing moved to llm_pricing_service.py (Mongo-backed, admin-editable
+# registry, seeded from this module's old hardcoded values so upgrading an
+# existing deployment produces identical cost numbers on day one). This
+# module's own cost lookups now go through that registry — see _cost_for
+# below, which is a thin async wrapper kept for this file's existing call
+# sites rather than importing the registry at every call site directly.
+async def _cost_for(provider: str, model: str, input_tokens: int, output_tokens: int,
+                     cached_tokens: Optional[int] = None) -> Dict[str, Any]:
+    from .llm_pricing_service import compute_cost
+    return await compute_cost(provider, model, input_tokens, output_tokens, cached_tokens)
 
 # Prompt-injection regex pre-screen (fast, no LLM call)
 INJECTION_PATTERNS = [
@@ -278,7 +263,7 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
-async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24,
+async def cost_agent(*, tokens: int, model: str = "", provider: str = "", lookback_hours: int = 24,
                       input_tokens: int = 0, output_tokens: int = 0) -> Dict[str, Any]:
     # Pull recent token-usage history from the same model
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=lookback_hours)).isoformat()
@@ -291,7 +276,8 @@ async def cost_agent(*, tokens: int, model: str = "", lookback_hours: int = 24,
         if not model or d.get("model") == model:
             history.append(int(d.get("tokens_total") or 0))
 
-    cost = _cost_for(model, input_tokens, output_tokens)
+    cost_result = await _cost_for(provider, model, input_tokens, output_tokens)
+    cost = cost_result["total_cost_usd"]
 
     avg = statistics.mean(history) if history else tokens
     stdev = statistics.pstdev(history) if len(history) > 5 else max(50, avg * 0.5)
@@ -867,6 +853,8 @@ async def evaluate_exchange(
     tenant_id: Optional[str] = None,
     usage: Optional[Dict[str, Any]] = None,
     prompt_hash: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    span_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run all active agents in parallel on one LLM exchange. Persist + return verdict.
 
@@ -891,10 +879,14 @@ async def evaluate_exchange(
         tokens_input = _estimate_tokens(user_input)
         tokens_output = _estimate_tokens(ai_output)
         tokens_estimate = tokens_input + tokens_output
+    # Real provider-reported cache tokens only (llm_provider_service sets this
+    # key only when the provider's own response actually included it) — never
+    # estimated, unlike the char-count token fallback above.
+    cached_tokens = (usage or {}).get("cached_tokens")
 
     # Statistical / regex agents — always run (cheap, no LLM)
     coros = [
-        cost_agent(tokens=tokens_estimate, model=model, input_tokens=tokens_input, output_tokens=tokens_output),
+        cost_agent(tokens=tokens_estimate, model=model, provider=provider, input_tokens=tokens_input, output_tokens=tokens_output),
         performance_agent(latency_ms=latency_ms, errored=errored,
                           error_message=error_message, model=model),
         pii_leak_agent(ai_output=ai_output),
@@ -940,6 +932,8 @@ async def evaluate_exchange(
     stored_user_input = redact_text(user_input[:2000], only_categories=SECRET_RULE_NAMES).text
     stored_ai_output = redact_text(ai_output[:4000], only_categories=SECRET_RULE_NAMES).text
 
+    cost_result = await _cost_for(provider, model, tokens_input, tokens_output, cached_tokens)
+
     now = datetime.now(timezone.utc)
     event = {
         "id": _new_id(),
@@ -954,6 +948,7 @@ async def evaluate_exchange(
         "model": model,
         "provider": provider,
         "prompt_hash": prompt_hash,  # ties this output to the exact system-prompt version that produced it
+        "trace_id": trace_id, "span_id": span_id,  # links this exchange to the distributed trace store, when set
         "user_input": stored_user_input,
         "ai_output": stored_ai_output,
         "latency_ms": latency_ms,
@@ -962,7 +957,12 @@ async def evaluate_exchange(
         "tokens_output": tokens_output,
         "tokens_total": tokens_estimate,
         "tokens_source": tokens_source,  # "provider" (real API usage) or "estimated" (char-count heuristic)
-        "estimated_cost_usd": _cost_for(model, tokens_input, tokens_output),
+        "cached_tokens": cached_tokens,  # real provider-reported cache-read tokens, None if not reported
+        "estimated_cost_usd": cost_result["total_cost_usd"],
+        "input_cost_usd": cost_result["input_cost_usd"],
+        "output_cost_usd": cost_result["output_cost_usd"],
+        "cache_savings_usd": cost_result["cache_savings_usd"],
+        "cost_unavailable_reason": cost_result["reason"],
         "agents": agent_outputs,
         "root_cause": rca,
         "verdict": verdict,
@@ -972,6 +972,27 @@ async def evaluate_exchange(
     except Exception as e:
         logger.warning("ai_monitoring_events insert failed: %s", e)
     event.pop("_id", None)
+
+    # Bridge into db.metrics_timeseries (same store OTLP/OneAgent metrics use)
+    # so the existing multi-algorithm anomaly ensemble (anomaly_detection_engine.py)
+    # covers LLM cost/latency/token spikes — zero new detection logic, pure
+    # data-bridging. Fire-and-forget: a metrics-bridge failure must never
+    # block the actual monitoring event from being recorded above.
+    try:
+        from .metrics_timeseries_service import metrics_timeseries_service
+        tags = {"model": model, "provider": provider, "source": source}
+        points = [
+            {"name": "llm.latency.ms", "value": float(latency_ms), "unit": "ms", "type": "gauge",
+             "timestamp": now.isoformat(), "tags": tags},
+            {"name": "llm.tokens.total", "value": float(tokens_estimate), "unit": "tokens", "type": "gauge",
+             "timestamp": now.isoformat(), "tags": tags},
+        ]
+        if cost_result["total_cost_usd"] is not None:
+            points.append({"name": "llm.cost.usd", "value": float(cost_result["total_cost_usd"]), "unit": "USD",
+                           "type": "gauge", "timestamp": now.isoformat(), "tags": tags})
+        await metrics_timeseries_service.ingest_batch(points)
+    except Exception as e:
+        logger.debug(f"llm metrics bridge to metrics_timeseries failed (non-fatal): {e}")
 
     # ─── Fan-out: critical/warning verdicts → real SOC alert via AlertEngine ───
     # Skipped when monitoring its own agent calls (already loop-prevented upstream).

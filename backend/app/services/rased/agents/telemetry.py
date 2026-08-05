@@ -36,7 +36,17 @@ def _now() -> datetime:
 class TelemetryRetrievalAgent:
     async def run(self, state: InvestigationState) -> dict:
         scenario_id = self._infer_scenario_id(state)
-        params = {"scenario_id": scenario_id} if scenario_id else {}
+        params: Dict = {"scenario_id": scenario_id} if scenario_id else {}
+        # Additive: existing MongoSeededAdapter._build_filter already reads
+        # params.get("service") if present (it just never received one before
+        # this change) — synthetic adapters are unaffected when these are
+        # absent; live adapters (e.g. OneAgentLiveAdapter) use them to scope
+        # a real query instead of a scenario_id.
+        if state.alerts:
+            if state.alerts[0].service:
+                params["service"] = state.alerts[0].service
+            if state.alerts[0].host:
+                params["host"] = state.alerts[0].host
 
         tool_results = await self._query_all_adapters(params)
         evidence = await self._load_evidence(scenario_id) if scenario_id else []

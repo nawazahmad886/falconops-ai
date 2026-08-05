@@ -22,6 +22,12 @@ enabled_plugins:
                                  # on PATH — if neither is found the plugin
                                  # fails to start cleanly and reports so via
                                  # /health (never fabricates a reading).
+  # - containers                # opt-in: cgroup-based CPU/memory per
+                                 # discovered container_id. Real cgroup v2 (or
+                                 # v1 fallback) reads via /proc/<pid>/cgroup —
+                                 # no Docker/Kubernetes API dependency. A
+                                 # container whose cgroup can't be read is
+                                 # skipped and logged, never fabricated.
 
 # ── Sampling / noise reduction ──────────────────────────
 sampling_rate: 1.0            # 0.0-1.0 probabilistic sampling of DEBUG/INFO logs

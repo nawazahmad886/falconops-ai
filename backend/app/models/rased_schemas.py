@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 # Sources an adapter can be queried against. Kept as one shared Literal so
 # Evidence, ToolResult, and ActionSpec.adapter all agree on the vocabulary.
-Source = Literal["elk", "appdynamics", "solarwinds", "mq", "db", "cmdb", "changes"]
+Source = Literal["elk", "appdynamics", "solarwinds", "mq", "db", "cmdb", "changes", "oneagent_live", "llm_live"]
 
 EvidenceTier = Literal["trigger", "deep"]
 

@@ -155,6 +155,7 @@ const MODULES = {
         sidebar: [
             { path: '/monitoring', label: 'Monitors', icon: MonitorCheck },
             { path: '/oneagent-fleet', label: 'OneAgent Fleet', icon: Radio },
+            { path: '/oneagent-explorer', label: 'OneAgent Explorer', icon: Activity },
             { path: '/uptime-monitor', label: 'Uptime Monitor', icon: Globe },
             { path: '/sla-dashboard', label: 'SLA Dashboard', icon: Shield },
             { path: '/check-nodes', label: 'Check Nodes', icon: Server },
@@ -195,6 +196,7 @@ const MODULES = {
             { path: '/ai-engine', label: 'Autonomous AI Engine', icon: Brain },
             { path: '/ai-copilot', label: 'AI Copilot Chat', icon: Sparkles },
             { path: '/ai-monitoring', label: 'AI Monitoring (legacy)', icon: BrainCircuit },
+            { path: '/llm-observability', label: 'LLM Observability', icon: Gauge },
             { path: '/ai-agents', label: 'AI Agents', icon: Brain },
             { path: '/alert-correlation', label: 'Alert Correlation', icon: GitBranch },
             { path: '/aiops-brain', label: 'AIOps Brain', icon: Brain },
@@ -395,6 +397,8 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         { type: 'page', label: 'Tool Catalog', path: '/ai/tools', icon: Wrench },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
+        { type: 'page', label: 'OneAgent Explorer', path: '/oneagent-explorer', icon: Activity },
+        { type: 'page', label: 'LLM Observability', path: '/llm-observability', icon: Gauge },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
         { type: 'page', label: 'Alert Engine', path: '/alert-engine', icon: Bell },
         { type: 'page', label: 'Incident Management', path: '/incident-engine', icon: AlertTriangle },
@@ -733,10 +737,10 @@ export const EnterpriseLayout = ({ children }) => {
         if (path.startsWith('/ai/workflow-executions')) return 'agentic_workflow';
         if (path.startsWith('/ai/tools')) return 'agentic_workflow';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/control-center', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
-        if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
+        if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet', '/oneagent-explorer'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';
         if (path.startsWith('/ai-observability') || path.startsWith('/ask-falconops')) return 'ai_observability';
-        if (['/core-aiops', '/aiops-brain', '/event-analyzer', '/capacity-prediction', '/intelligence', '/remediation', '/impact-analysis', '/ai-agents', '/alert-correlation', '/k8s-healing', '/ai-monitoring'].some(p => path.startsWith(p))) return 'aiops';
+        if (['/core-aiops', '/aiops-brain', '/event-analyzer', '/capacity-prediction', '/intelligence', '/remediation', '/impact-analysis', '/ai-agents', '/alert-correlation', '/k8s-healing', '/ai-monitoring', '/llm-observability'].some(p => path.startsWith(p))) return 'aiops';
         if (['/executive-security', '/security-monitoring', '/ueba', '/attack-simulator', '/soc-live-feed', '/aws-connectors', '/detection-rules'].some(p => path.startsWith(p))) return 'security';
         if (['/runbooks'].some(p => path.startsWith(p))) return 'automation';
         if (['/analytics', '/reports', '/weekly-reports', '/scheduled-reports', '/tenant-schedules', '/report-builder'].some(p => path.startsWith(p))) return 'insights';

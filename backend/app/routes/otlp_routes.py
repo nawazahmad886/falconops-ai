@@ -33,7 +33,6 @@ from ..core.database import db
 from ..core.config import JWT_SECRET, JWT_ALGORITHM
 from ..utils.auth import require_auth
 from ..services import trace_rca_service, trace_alert_engine, call_flow_broadcaster
-from ..services.topology_service import topology_service
 from ..services.metrics_timeseries_service import metrics_timeseries_service
 
 logger = logging.getLogger(__name__)
@@ -47,89 +46,20 @@ trace_router = APIRouter(prefix="/api/traces", tags=["Trace Viewer"])
 
 
 # ─────────────────────────────────────────────────────
-#  OTLP span normalisation
+#  OTLP span normalisation — moved to trace_persistence_service.py so
+#  oneagent_routes.py's trace ingest path can call the exact same
+#  persistence logic (see that module's docstring for why).
 # ─────────────────────────────────────────────────────
 
-def _attr_to_value(attr: Dict) -> Any:
-    """OTel attributes are wrapped in {key, value:{stringValue|intValue|...}}."""
-    v = attr.get("value", {})
-    for k in ("stringValue", "intValue", "boolValue", "doubleValue"):
-        if k in v:
-            return v[k]
-    if "arrayValue" in v:
-        return [_attr_to_value({"value": x}) for x in v["arrayValue"].get("values", [])]
-    return None
-
-
-def _attrs_to_dict(attrs: List[Dict]) -> Dict:
-    return {a["key"]: _attr_to_value(a) for a in attrs or []}
-
-
-def _ns_to_iso(ns_str: str) -> str:
-    """OTLP timestamps are nanoseconds since epoch as strings."""
-    try:
-        ns = int(ns_str)
-        sec = ns / 1_000_000_000
-        return datetime.fromtimestamp(sec, tz=timezone.utc).isoformat()
-    except Exception:
-        return datetime.now(timezone.utc).isoformat()
-
-
-def _ns_diff_ms(start_ns: str, end_ns: str) -> float:
-    try:
-        return (int(end_ns) - int(start_ns)) / 1_000_000
-    except Exception:
-        return 0.0
-
-
-def _extract_exception(span: Dict) -> Dict[str, Optional[str]]:
-    """OTel semantic convention: an exception recorded on a span appears as a span
-    event named 'exception' carrying exception.type/exception.message attributes.
-    Real data if the instrumented app actually recorded one; None otherwise — never
-    fabricated."""
-    for event in span.get("events") or []:
-        if event.get("name") == "exception":
-            attrs = _attrs_to_dict(event.get("attributes") or [])
-            return {
-                "exception_type": attrs.get("exception.type"),
-                "exception_message": attrs.get("exception.message"),
-            }
-    return {"exception_type": None, "exception_message": None}
-
-
-def _normalize_span(span: Dict, resource_attrs: Dict, scope_name: str) -> Dict:
-    """Convert one OTLP span to our internal schema."""
-    span_attrs = _attrs_to_dict(span.get("attributes") or [])
-    service = (
-        resource_attrs.get("service.name")
-        or resource_attrs.get("service")
-        or "unknown-service"
-    )
-    status = (span.get("status") or {}).get("code")
-    # Map status code: 0=UNSET 1=OK 2=ERROR
-    status_text = "ERROR" if status == 2 else "OK"
-    kind_map = {1: "INTERNAL", 2: "SERVER", 3: "CLIENT", 4: "PRODUCER", 5: "CONSUMER"}
-    exc = _extract_exception(span)
-    return {
-        "id": str(uuid.uuid4()),
-        "trace_id": span.get("traceId"),
-        "span_id": span.get("spanId"),
-        "parent_span_id": span.get("parentSpanId") or None,
-        "service": service,
-        "operation": span.get("name") or "unknown",
-        "kind": kind_map.get(span.get("kind"), "INTERNAL"),
-        "start_time": _ns_to_iso(span.get("startTimeUnixNano", "0")),
-        "end_time": _ns_to_iso(span.get("endTimeUnixNano", "0")),
-        "duration_ms": _ns_diff_ms(span.get("startTimeUnixNano", "0"),
-                                   span.get("endTimeUnixNano", "0")),
-        "status": status_text,
-        "exception_type": exc["exception_type"],
-        "exception_message": exc["exception_message"],
-        "attributes": span_attrs,
-        "resource": resource_attrs,
-        "scope": scope_name,
-        "received_at": datetime.now(timezone.utc).isoformat(),
-    }
+from ..services.trace_persistence_service import (  # noqa: E402
+    attr_to_value as _attr_to_value,
+    attrs_to_dict as _attrs_to_dict,
+    ns_to_iso as _ns_to_iso,
+    ns_diff_ms as _ns_diff_ms,
+    extract_exception as _extract_exception,
+    normalize_span as _normalize_span,
+    persist_normalized_spans as _persist_spans,
+)
 
 
 def _numeric_point_value(point: Dict) -> Optional[float]:
@@ -199,101 +129,6 @@ def _normalize_metric_points(body: Dict) -> List[Dict]:
     return points
 
 
-async def _persist_spans(spans: List[Dict]):
-    if not spans:
-        return
-    await db.otel_spans.insert_many(spans, ordered=False)
-    # Build trace summary docs (1 per traceId)
-    by_trace: Dict[str, List[Dict]] = {}
-    for s in spans:
-        by_trace.setdefault(s["trace_id"], []).append(s)
-
-    for trace_id, group in by_trace.items():
-        root = next((s for s in group if not s["parent_span_id"]), group[0])
-        services = list({s["service"] for s in group})
-        max_end = max(s["end_time"] for s in group)
-        min_start = min(s["start_time"] for s in group)
-        try:
-            duration = (datetime.fromisoformat(max_end.replace("Z", "+00:00"))
-                        - datetime.fromisoformat(min_start.replace("Z", "+00:00"))).total_seconds() * 1000
-        except Exception:
-            duration = 0
-        errors = sum(1 for s in group if s["status"] == "ERROR")
-        await db.otel_traces.update_one(
-            {"trace_id": trace_id},
-            {"$set": {
-                "trace_id": trace_id,
-                "root_service": root["service"],
-                "root_operation": root["operation"],
-                "services": services,
-                "span_count": len(group),
-                "error_count": errors,
-                "duration_ms": round(duration, 1),
-                "start_time": min_start,
-                "end_time": max_end,
-                "status": "ERROR" if errors else "OK",
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, "$setOnInsert": {"id": str(uuid.uuid4()), "received_at": datetime.now(timezone.utc).isoformat()}},
-            upsert=True,
-        )
-
-    # Update service dependency edges
-    edges_seen = set()
-    trace_pairs: List[Dict] = []
-    for s in spans:
-        if not s["parent_span_id"]:
-            continue
-        parent = next((p for p in spans if p["span_id"] == s["parent_span_id"]), None)
-        # Cross-batch fallback: parent span may already be persisted from an earlier batch
-        if not parent:
-            parent_doc = await db.otel_spans.find_one(
-                {"span_id": s["parent_span_id"], "trace_id": s["trace_id"]},
-                {"_id": 0, "service": 1, "span_id": 1},
-            )
-            if parent_doc:
-                parent = parent_doc
-        if not parent or parent["service"] == s["service"]:
-            continue
-
-        # Broadcast one live event per real cross-service span, BEFORE the
-        # edges_seen dedup below — a single OTLP batch commonly contains many
-        # real spans on the same edge, and every one of them should animate,
-        # not just the first (the dedup below exists only to avoid redundant
-        # DB upserts, not to throttle how many real calls actually happened).
-        try:
-            await call_flow_broadcaster.broadcast_call_event(
-                source=parent["service"], target=s["service"], status=s["status"],
-                duration_ms=s.get("duration_ms"), operation=s.get("operation") or "",
-                trace_id=s["trace_id"], span_id=s["span_id"],
-            )
-        except Exception as e:
-            logger.debug(f"call_flow broadcast failed (non-fatal): {e}")
-
-        edge_key = (parent["service"], s["service"])
-        if edge_key in edges_seen:
-            continue
-        edges_seen.add(edge_key)
-        trace_pairs.append({"service": s["service"], "parent_service": parent["service"]})
-        await db.service_dependencies.update_one(
-            {"service": parent["service"], "depends_on": s["service"]},
-            {"$set": {"last_seen": datetime.now(timezone.utc).isoformat()},
-             "$setOnInsert": {"first_seen": datetime.now(timezone.utc).isoformat()},
-             "$inc": {"call_count": 1, "error_count": 1 if s["status"] == "ERROR" else 0}},
-            upsert=True,
-        )
-
-    # Feed the same real parent/child relationships into topology_nodes/topology_edges —
-    # this is the collection smart_correlation_engine.py and ai_correlation.py actually read
-    # for topology-aware alert correlation. It was previously only ever populated by manual
-    # API calls or demo seed data, never by real trace data, so that correlation signal was
-    # always empty in practice.
-    if trace_pairs:
-        try:
-            await topology_service.auto_discover_from_traces(trace_pairs)
-        except Exception as e:
-            logger.warning(f"Topology auto-discovery from traces failed (non-fatal): {e}")
-
-
 # ─────────────────────────────────────────────────────
 #  OTLP endpoints (public — what APM agents POST to)
 # ─────────────────────────────────────────────────────
@@ -351,7 +186,7 @@ async def otlp_logs(request: Request):
             for log_record in scope_log.get("logRecords", []):
                 body_val = log_record.get("body", {}).get("stringValue", "")
                 severity = log_record.get("severityText") or "INFO"
-                logs_to_save.append({
+                doc = {
                     "id": str(uuid.uuid4()),
                     "timestamp": _ns_to_iso(log_record.get("timeUnixNano", "0")),
                     "service": service,
@@ -359,7 +194,16 @@ async def otlp_logs(request: Request):
                     "body": body_val,
                     "attributes": _attrs_to_dict(log_record.get("attributes", [])),
                     "received_at": datetime.now(timezone.utc).isoformat(),
-                })
+                }
+                # OTel LogRecords carry trace_id/span_id at the top level per spec —
+                # previously silently dropped here even though real exporters send
+                # them, breaking Trace<->Log navigation. Real correlation only:
+                # absent when the exporter didn't attach one, never invented.
+                if log_record.get("traceId"):
+                    doc["trace_id"] = log_record["traceId"]
+                if log_record.get("spanId"):
+                    doc["span_id"] = log_record["spanId"]
+                logs_to_save.append(doc)
     if logs_to_save:
         await db.otel_logs.insert_many(logs_to_save, ordered=False)
     return {"accepted": len(logs_to_save)}
@@ -492,8 +336,9 @@ call_flow_broadcaster.call_flow_manager.authenticate = _call_flow_authenticate
 @trace_router.websocket("/live")
 async def call_flow_live(ws: WebSocket):
     """WebSocket: one message per real cross-service span detected during
-    OTLP trace ingestion (see the broadcast call inside _persist_spans above).
-    No initial-state replay — the base graph is served by
+    trace ingestion (see the broadcast call inside
+    trace_persistence_service.persist_normalized_spans, shared by both the
+    OTLP and OneAgent ingest paths). No initial-state replay — the base graph is served by
     GET /api/traces/services/dependencies on page load; individual call
     events are inherently transient."""
     if not await call_flow_broadcaster.call_flow_manager.connect(ws):

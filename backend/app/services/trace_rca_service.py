@@ -174,7 +174,32 @@ def _detect_hotspots(spans: List[Dict], total_duration_ms: float) -> List[Dict]:
 #  AI summary
 # ─────────────────────────────────────────────────────
 
-def _build_ai_prompt(trace: Dict, slow: List[Dict], errors: List[Dict], hotspots: List[Dict]) -> List[Dict]:
+async def _gather_llm_evidence(spans: List[Dict]) -> List[Dict]:
+    """When this trace includes an LLM call (a span whose service is
+    'llm:{provider}' — see llm_provider_service.chat_completion's span
+    emission), pull its real cost/token/cache record from
+    db.ai_monitoring_events via the matching trace_id/span_id — additive
+    evidence for the existing RCA narrative, not a new RCA engine. Returns
+    [] (not fabricated placeholders) when no LLM span exists in this trace or
+    no matching monitoring record is found."""
+    llm_span_ids = [s["span_id"] for s in spans if str(s.get("service", "")).startswith("llm:")]
+    if not llm_span_ids:
+        return []
+    try:
+        docs = await db.ai_monitoring_events.find(
+            {"span_id": {"$in": llm_span_ids}},
+            {"_id": 0, "model": 1, "provider": 1, "latency_ms": 1, "tokens_total": 1, "tokens_input": 1,
+             "tokens_output": 1, "cached_tokens": 1, "estimated_cost_usd": 1, "cache_savings_usd": 1,
+             "errored": 1, "span_id": 1},
+        ).to_list(20)
+        return docs
+    except Exception as e:
+        logger.debug(f"llm evidence lookup failed for trace RCA (non-fatal): {e}")
+        return []
+
+
+def _build_ai_prompt(trace: Dict, slow: List[Dict], errors: List[Dict], hotspots: List[Dict],
+                      llm_evidence: Optional[List[Dict]] = None) -> List[Dict]:
     services = trace.get("services") or []
     parts = [
         f"Trace ID: {trace.get('trace_id')}",
@@ -201,6 +226,16 @@ def _build_ai_prompt(trace: Dict, slow: List[Dict], errors: List[Dict], hotspots
         parts.append("HOTSPOTS (% of total trace wall time):")
         for h in hotspots[:5]:
             parts.append(f"  - {h['service']}.{h['operation']}: {h['duration_ms']:.0f}ms ({h['share_pct']}%)")
+        parts.append("")
+    if llm_evidence:
+        parts.append("LLM CALL EVIDENCE (real, from AI monitoring — this trace includes an LLM call):")
+        for ev in llm_evidence:
+            cost = f"${ev['estimated_cost_usd']:.4f}" if ev.get("estimated_cost_usd") is not None else "cost unavailable (unpriced model)"
+            cache = f", {ev['cached_tokens']} cached tokens" if ev.get("cached_tokens") else ""
+            parts.append(f"  - {ev.get('provider')}/{ev.get('model')}: {ev.get('tokens_total')} tokens "
+                         f"({ev.get('tokens_input')} in / {ev.get('tokens_output')} out{cache}), "
+                         f"{ev.get('latency_ms', 0):.0f}ms, {cost}"
+                         f"{' — ERRORED' if ev.get('errored') else ''}")
         parts.append("")
     parts.append("Write a concise root-cause analysis (max 6 bullet points, no markdown headers): "
                  "(1) one-sentence verdict, (2) most likely root cause, (3) evidence pointing to it, "
@@ -253,12 +288,13 @@ def _rule_based_summary(trace: Dict, slow: List[Dict], errors: List[Dict], hotsp
     return "\n".join(f"- {b}" for b in bullets)
 
 
-async def _ai_summary(trace: Dict, slow: List[Dict], errors: List[Dict], hotspots: List[Dict]) -> Dict:
+async def _ai_summary(trace: Dict, slow: List[Dict], errors: List[Dict], hotspots: List[Dict],
+                       llm_evidence: Optional[List[Dict]] = None) -> Dict:
     """Generate the AI-written RCA summary. Always returns a string; uses rule-based fallback on any error."""
     fallback_text = _rule_based_summary(trace, slow, errors, hotspots)
     try:
         resp = await llm_provider_service.chat_completion(
-            _build_ai_prompt(trace, slow, errors, hotspots),
+            _build_ai_prompt(trace, slow, errors, hotspots, llm_evidence),
             session_id=f"trace-rca-{trace.get('trace_id', 'unknown')}",
         )
         text = (resp.get("response") or "").strip()
@@ -436,7 +472,8 @@ async def analyze_trace(trace_id: str) -> Dict[str, Any]:
     slow = await _detect_slow_spans(spans)
     errors = _detect_error_chain(spans)
     hotspots = _detect_hotspots(spans, trace.get("duration_ms") or 0)
-    summary = await _ai_summary(trace, slow, errors, hotspots)
+    llm_evidence = await _gather_llm_evidence(spans)
+    summary = await _ai_summary(trace, slow, errors, hotspots, llm_evidence)
 
     report = {
         "trace_id": trace_id,
@@ -446,6 +483,7 @@ async def analyze_trace(trace_id: str) -> Dict[str, Any]:
         "slow_spans": slow,
         "error_chains": errors,
         "hotspots": hotspots,
+        "llm_evidence": llm_evidence,
         "summary": summary,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }

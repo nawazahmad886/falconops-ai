@@ -21,6 +21,17 @@ has:
                  configured DB agents (db_instances/db_metrics/db_slow_queries/
                  db_locks) — the latest real reading, timestamped, not a fresh
                  on-demand query (no live per-instance SQL connection here).
+  - oneagent_host: diagnostics against any OneAgent-MONITORED host (not just
+                 this backend's own host, unlike the "linux" category above) —
+                 but still no remote execution: every command here reads
+                 telemetry OneAgent already streamed into Mongo (metrics/
+                 processes/connections/logs), honestly labeled with its real
+                 collection timestamp. OneAgent's transport is send-only
+                 (confirmed in oneagent/pkg/transport/transport.go — heartbeat
+                 only ever POSTs out, never receives) — this project explicitly
+                 declined a remote-exec-agent-on-any-host model for security
+                 reasons, so "diagnostics" here means "query what's already
+                 been collected," never "probe the host live."
 
 A command that has nothing configured to run against returns an honest
 "not configured" result — never fabricated output.
@@ -57,6 +68,14 @@ COMMAND_CATALOG: List[Dict[str, Any]] = [
      "description": "Latest collected slow-query log for a DB instance.", "params": ["instance_id"]},
     {"id": "db_locks", "category": "database", "label": "Locks", "risk": "low",
      "description": "Latest collected lock/blocking data for a DB instance.", "params": ["instance_id"]},
+    {"id": "oneagent_host_snapshot", "category": "oneagent_host", "label": "Host Snapshot", "risk": "low",
+     "description": "Latest collected CPU/memory/disk metrics for an OneAgent-monitored host.", "params": ["host"]},
+    {"id": "oneagent_host_processes", "category": "oneagent_host", "label": "Process List", "risk": "low",
+     "description": "Current discovered process list for an OneAgent-monitored host (from its last heartbeat).", "params": ["host"]},
+    {"id": "oneagent_host_connections", "category": "oneagent_host", "label": "Network Connections", "risk": "low",
+     "description": "Recently observed TCP connections for an OneAgent-monitored host.", "params": ["host"]},
+    {"id": "oneagent_host_logs", "category": "oneagent_host", "label": "Recent Logs", "risk": "low",
+     "description": "Most recent log lines collected from an OneAgent-monitored host.", "params": ["host"]},
 ]
 
 _BY_ID = {c["id"]: c for c in COMMAND_CATALOG}
@@ -194,6 +213,45 @@ async def _run_database(command_id: str, params: Dict[str, Any]) -> Dict[str, An
     return {"available": True, "readings": docs, "note": "latest collected reading, not a fresh live query"}
 
 
+async def _run_oneagent_host(command_id: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    from ..core.database import db
+
+    host = params.get("host")
+    if not host:
+        return {"available": False, "reason": "host required"}
+
+    agent_doc = await db.oneagent_agents.find_one({"host": host}, {"_id": 0})
+    if not agent_doc:
+        return {"available": False, "reason": f"no OneAgent reporting for host '{host}'"}
+
+    if command_id == "oneagent_host_snapshot":
+        metrics = await db.metrics_timeseries.find(
+            {"tags.host": host}, {"_id": 0, "name": 1, "value": 1, "unit": 1, "timestamp": 1},
+        ).sort("timestamp", -1).limit(30).to_list(30)
+        if not metrics:
+            return {"available": False, "reason": f"no metrics collected yet for host '{host}'"}
+        return {"available": True, "metrics": metrics, "note": "latest collected readings, not a fresh live probe"}
+
+    if command_id == "oneagent_host_processes":
+        services = agent_doc.get("services") or []
+        return {"available": True, "processes": services, "as_of": agent_doc.get("last_seen"),
+                "note": "from the agent's last heartbeat, not a fresh live process scan"}
+
+    if command_id == "oneagent_host_connections":
+        conns = await db.oneagent_netflows.find({"host": host}, {"_id": 0}).sort("received_at", -1).limit(50).to_list(50)
+        if not conns:
+            return {"available": False, "reason": f"no connections collected yet for host '{host}' (netflow plugin may not be enabled)"}
+        return {"available": True, "connections": conns, "note": "latest collected snapshot, not a fresh live probe"}
+
+    if command_id == "oneagent_host_logs":
+        logs = await db.logs.find({"host": host}, {"_id": 0}).sort("timestamp", -1).limit(50).to_list(50)
+        if not logs:
+            return {"available": False, "reason": f"no logs collected yet for host '{host}'"}
+        return {"available": True, "logs": logs, "note": "most recently collected log lines"}
+
+    raise ValueError(f"unknown oneagent_host command: {command_id}")
+
+
 async def run_command(command_id: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     spec = _BY_ID.get(command_id)
     if spec is None:
@@ -210,6 +268,8 @@ async def run_command(command_id: str, params: Optional[Dict[str, Any]] = None) 
             output = await _run_network(command_id, params)
         elif spec["category"] == "database":
             output = await _run_database(command_id, params)
+        elif spec["category"] == "oneagent_host":
+            output = await _run_oneagent_host(command_id, params)
         else:
             raise ValueError(f"unknown category: {spec['category']}")
         ok = True

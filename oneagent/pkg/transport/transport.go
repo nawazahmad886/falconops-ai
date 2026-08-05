@@ -130,13 +130,23 @@ func (s *HTTPSender) HeartbeatLoop(ctx context.Context, disc *discovery.Discover
 	url := strings.TrimRight(s.cfg.BackendURL, "/") + "/api/ingest/heartbeat"
 	send := func() {
 		services := disc.Services()
-		names := make([]map[string]string, 0, len(services))
+		// map[string]any (not map[string]string) so pid/ports stay numeric —
+		// the backend's ingest_heartbeat additively accepts these new fields
+		// while still tolerating older agent versions that only send name/runtime.
+		descs := make([]map[string]any, 0, len(services))
 		for _, svc := range services {
-			names = append(names, map[string]string{"name": svc.Name, "runtime": svc.Runtime})
+			d := map[string]any{"name": svc.Name, "runtime": svc.Runtime, "pid": svc.PID}
+			if svc.ContainerID != "" {
+				d["container_id"] = svc.ContainerID
+			}
+			if len(svc.Ports) > 0 {
+				d["ports"] = svc.Ports
+			}
+			descs = append(descs, d)
 		}
 		body, _ := json.Marshal(map[string]any{
 			"host": s.cfg.Hostname, "environment": s.cfg.Environment,
-			"agent_version": s.version, "services": names,
+			"agent_version": s.version, "services": descs,
 		})
 		if err := s.post(ctx, url, body); err != nil && s.cfg.Debug {
 			s.logger.Printf("heartbeat failed: %v", err)

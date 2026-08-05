@@ -240,6 +240,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"AI Operations seed warning: {e}")
 
+    # LLM Observability: seed the pricing registry from the previously hardcoded
+    # rate table so upgrading an existing deployment produces identical cost
+    # numbers on day one (idempotent — a no-op after the first boot).
+    try:
+        from app.services.llm_pricing_service import seed_from_defaults
+        await seed_from_defaults()
+    except Exception as e:
+        logger.warning(f"LLM pricing registry seed warning: {e}")
+
     # Control Center: job watchdog — auto-restarts any of the above asyncio_task
     # background jobs if it crashes or stops unexpectedly while this process is
     # still up (whole-process crashes are already handled by docker-compose's

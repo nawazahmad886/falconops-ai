@@ -6,6 +6,8 @@ from .mq import MQAdapter
 from .db import DBAdapter
 from .cmdb import CMDBAdapter
 from .changes import ChangesAdapter
+from .oneagent_live import OneAgentLiveAdapter
+from .llm_observability_live import LLMObservabilityLiveAdapter
 
 ADAPTERS: dict[str, Adapter] = {
     "elk": ELKAdapter(),
@@ -15,6 +17,8 @@ ADAPTERS: dict[str, Adapter] = {
     "db": DBAdapter(),
     "cmdb": CMDBAdapter(),
     "changes": ChangesAdapter(),
+    "oneagent_live": OneAgentLiveAdapter(),
+    "llm_live": LLMObservabilityLiveAdapter(),
 }
 
 __all__ = [
@@ -27,5 +31,7 @@ __all__ = [
     "DBAdapter",
     "CMDBAdapter",
     "ChangesAdapter",
+    "OneAgentLiveAdapter",
+    "LLMObservabilityLiveAdapter",
     "ADAPTERS",
 ]

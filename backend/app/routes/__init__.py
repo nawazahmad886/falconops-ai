@@ -95,6 +95,7 @@ from .agent_builder_routes import router as agent_builder_router
 from .tool_catalog_routes import router as tool_catalog_router
 from .workflow_builder_routes import router as workflow_builder_router
 from .workflow_execution_routes import router as workflow_execution_router
+from .llm_observability_routes import router as llm_observability_router
 
 # Export all routers
 all_routers = [
@@ -200,4 +201,5 @@ all_routers = [
     tool_catalog_router,
     workflow_builder_router,
     workflow_execution_router,
+    llm_observability_router,
 ]

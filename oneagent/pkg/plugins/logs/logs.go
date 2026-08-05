@@ -190,12 +190,54 @@ func (p *Plugin) emitLine(service, sourceType, line string) {
 	if !p.levelAllowed(level) {
 		return
 	}
+	data := map[string]any{"level": level, "message": truncate(message, 4000), "source": sourceType}
+	if traceID, spanID := extractTraceFields(message); traceID != "" {
+		data["trace_id"] = traceID
+		if spanID != "" {
+			data["span_id"] = spanID
+		}
+	}
 	p.pipe.Emit(pipeline.Event{
 		Kind: "log", Service: service,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
-		Data:      map[string]any{"level": level, "message": truncate(message, 4000), "source": sourceType},
+		Data:      data,
 		Tags:      map[string]string{"host": p.cfg.Hostname},
 	})
+}
+
+// traceFieldKeys covers the structured-logging conventions actually in use
+// by common frameworks/SDKs (OTel's own field names, plus the two other
+// widely-deployed conventions) — never invents a correlation ID that isn't
+// already present in the app's own log output.
+var traceIDKeys = []string{"trace_id", "traceId", "trace.id", "dd.trace_id"}
+var spanIDKeys = []string{"span_id", "spanId", "span.id", "dd.span_id"}
+
+// extractTraceFields is a best-effort parse of a JSON-structured log line.
+// Plain-text (non-JSON) log lines simply yield no correlation — this is not
+// a log-format transformer, only an opportunistic reader of what's already
+// structured.
+func extractTraceFields(message string) (traceID, spanID string) {
+	trimmed := strings.TrimSpace(message)
+	if len(trimmed) < 2 || trimmed[0] != '{' {
+		return "", ""
+	}
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &fields); err != nil {
+		return "", ""
+	}
+	for _, k := range traceIDKeys {
+		if v, ok := fields[k].(string); ok && v != "" {
+			traceID = v
+			break
+		}
+	}
+	for _, k := range spanIDKeys {
+		if v, ok := fields[k].(string); ok && v != "" {
+			spanID = v
+			break
+		}
+	}
+	return traceID, spanID
 }
 
 func (p *Plugin) levelAllowed(level string) bool {

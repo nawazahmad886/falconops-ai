@@ -208,7 +208,8 @@ async def dashboard(user: dict = Depends(require_auth),
             "total": summary.get("total_tokens", 0),
             "cost_usd": round(summary.get("total_cost_usd") or 0, 4),
             # Honesty flags for the UI: cost_usd above excludes calls to models with
-            # no entry in USD_PER_1K_TOKENS, and "total" may partly be char-count
+            # no entry in the llm_pricing registry (llm_pricing_service.py), and
+            # "total" may partly be char-count
             # estimates rather than provider-reported usage — surface both instead
             # of letting the totals look more precise than they are.
             "unpriced_events": summary.get("unpriced_count", 0),

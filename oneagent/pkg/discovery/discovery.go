@@ -23,6 +23,7 @@ type Service struct {
 	Runtime     string            `json:"runtime"` // nodejs|python|java|go|dotnet|native
 	Cmdline     string            `json:"cmdline"`
 	ContainerID string            `json:"container_id,omitempty"`
+	Ports       []int             `json:"ports,omitempty"`
 	Tags        map[string]string `json:"tags"`
 	FirstSeen   time.Time         `json:"first_seen"`
 	LastSeen    time.Time         `json:"last_seen"`
@@ -110,9 +111,10 @@ func (d *Discovery) scan() {
 		if containerID != "" {
 			tags["container_id"] = containerID
 		}
+		ports := d.listeningPorts(e.Name())
 		d.services[pid] = &Service{
 			PID: pid, Name: name, Runtime: runtime, Cmdline: truncate(cmdline, 300),
-			ContainerID: containerID, Tags: tags, FirstSeen: now, LastSeen: now,
+			ContainerID: containerID, Ports: ports, Tags: tags, FirstSeen: now, LastSeen: now,
 		}
 		d.logger.Printf("discovered service %q (runtime=%s pid=%d)", name, runtime, pid)
 		d.mu.Unlock()
@@ -130,6 +132,48 @@ func (d *Discovery) scan() {
 func (d *Discovery) readCwd(pid int) string {
 	link, _ := os.Readlink(filepath.Join(d.procRoot, strconv.Itoa(pid), "cwd"))
 	return link
+}
+
+// listeningPorts reads the process's own /proc/<pid>/net/tcp{,6} — its own
+// network-namespace view (correct for both host processes and containerized
+// ones with a private netns, unlike scanning the host's /proc/net/tcp and
+// cross-referencing by inode) — and returns local ports in LISTEN state
+// (kernel state code "0A", same vocabulary netflow.go's tcpStateNames uses).
+// Computed once at first discovery, same lifecycle as Name/Runtime/ContainerID
+// above — not re-read on every 30s tick for already-known PIDs.
+func (d *Discovery) listeningPorts(pidDir string) []int {
+	const listenState = "0A"
+	seen := map[int]bool{}
+	var ports []int
+	for _, f := range []string{"net/tcp", "net/tcp6"} {
+		data, err := os.ReadFile(filepath.Join(d.procRoot, pidDir, f))
+		if err != nil {
+			continue // permission denied or process exited — skip, matches netflow.go's handling
+		}
+		lines := strings.Split(string(data), "\n")
+		if len(lines) < 2 {
+			continue
+		}
+		for _, line := range lines[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 4 || strings.ToUpper(fields[3]) != listenState {
+				continue
+			}
+			parts := strings.SplitN(fields[1], ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			port, err := strconv.ParseUint(parts[1], 16, 32)
+			if err != nil {
+				continue
+			}
+			if !seen[int(port)] {
+				seen[int(port)] = true
+				ports = append(ports, int(port))
+			}
+		}
+	}
+	return ports
 }
 
 // ClassifyRuntime identifies the service runtime from its command line.

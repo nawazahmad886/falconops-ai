@@ -142,7 +142,7 @@ async def ingest_logs(request: Request, key: Dict = Depends(_verify_api_key)) ->
     docs = []
     for item in payload["batch"]:
         level = str(item.get("level") or "INFO").upper()
-        docs.append({
+        doc = {
             "id": str(uuid.uuid4()),
             "timestamp": item.get("timestamp") or now,
             "severity": level.lower(),
@@ -154,7 +154,15 @@ async def ingest_logs(request: Request, key: Dict = Depends(_verify_api_key)) ->
             "source": item.get("source") or "oneagent",
             "tags": item.get("tags") or {},
             "created_at": now,
-        })
+        }
+        # OneAgent's logs.go plugin opportunistically extracts trace_id/span_id
+        # from JSON-structured log lines when the app already emits them — real
+        # correlation only, absent when the log line wasn't already structured.
+        if item.get("trace_id"):
+            doc["trace_id"] = item["trace_id"]
+        if item.get("span_id"):
+            doc["span_id"] = item["span_id"]
+        docs.append(doc)
     if docs:
         await db.logs.insert_many(docs)
     return {"status": "ok", "ingested": len(docs)}
@@ -194,53 +202,29 @@ async def ingest_metrics(request: Request, key: Dict = Depends(_verify_api_key))
 
 @ingest_router.post("/traces")
 async def ingest_traces(request: Request, key: Dict = Depends(_verify_api_key)) -> Dict:
+    """Normalizes OneAgent's flat trace batch shape into the same internal
+    span schema OTLP-derived spans use, then calls the SAME shared
+    persistence function otlp_routes.py's direct-OTLP path calls
+    (trace_persistence_service.persist_normalized_spans) — previously this
+    route did its own narrower insert here and OneAgent-sourced spans never
+    built topology edges/service_dependencies/live call-flow events, unlike
+    directly-OTLP-exported spans landing in the exact same collections."""
+    from ..services.trace_persistence_service import (
+        normalized_span_from_oneagent_item, persist_normalized_spans,
+    )
+
     payload = await _read_batch(request)
-    now = _now_iso()
-    span_docs = []
-    traces: Dict[str, Dict] = {}
+    host = payload.get("host", "unknown")
+    spans = []
     for item in payload["batch"]:
-        trace_id = item.get("trace_id")
-        if not trace_id:
-            continue
-        service = item.get("service") or "unknown"
-        duration = float(item.get("duration_ms") or 0)
-        is_err = str(item.get("status", "")).upper() == "ERROR"
-        span_docs.append({
-            "id": str(uuid.uuid4()),
-            "trace_id": trace_id,
-            "span_id": item.get("span_id"),
-            "parent_span_id": item.get("parent_span_id") or None,
-            "name": item.get("name") or "span",
-            "service_name": service,
-            "duration_ms": duration,
-            "status": "ERROR" if is_err else "OK",
-            "start_time": item.get("timestamp") or now,
-            "attributes": item.get("attributes") or {},
-            "received_at": now,
-            "source": "oneagent",
-        })
-        t = traces.setdefault(trace_id, {"services": set(), "duration_ms": 0.0,
-                                         "has_error": False, "root_span_name": None})
-        t["services"].add(service)
-        t["duration_ms"] = max(t["duration_ms"], duration)
-        t["has_error"] = t["has_error"] or is_err
-        if not item.get("parent_span_id"):
-            t["root_span_name"] = item.get("name")
-    if span_docs:
-        await db.otel_spans.insert_many(span_docs)
-    for trace_id, t in traces.items():
-        await db.otel_traces.update_one(
-            {"trace_id": trace_id},
-            {"$set": {"received_at": now, "source": "oneagent"},
-             "$addToSet": {"services": {"$each": sorted(t["services"])}},
-             "$max": {"duration_ms": t["duration_ms"]},
-             "$setOnInsert": {"trace_id": trace_id,
-                              "root_span_name": t["root_span_name"] or "span",
-                              "has_error": t["has_error"]}},
-            upsert=True)
-        if t["has_error"]:
-            await db.otel_traces.update_one({"trace_id": trace_id}, {"$set": {"has_error": True}})
-    return {"status": "ok", "ingested": len(span_docs), "traces": len(traces)}
+        span = normalized_span_from_oneagent_item(item, host, default_service="unknown")
+        if span is not None:
+            spans.append(span)
+
+    if spans:
+        await persist_normalized_spans(spans)
+    trace_count = len({s["trace_id"] for s in spans})
+    return {"status": "ok", "ingested": len(spans), "traces": trace_count}
 
 
 @ingest_router.post("/netflows")
@@ -271,18 +255,33 @@ async def ingest_heartbeat(request: Request, key: Dict = Depends(_verify_api_key
         raise HTTPException(status_code=400, detail="invalid JSON body")
     host = payload.get("host") or "unknown"
     now = _now_iso()
+
+    # Services now arrive as {name, runtime, pid, container_id?, ports?} —
+    # additive vs the older {name, runtime}-only shape, so a pre-V2 agent's
+    # heartbeat (missing pid/container_id/ports) is stored unchanged and
+    # still works; nothing here requires the new fields to be present.
+    services = payload.get("services") or []
+
+    previous_doc = await db.oneagent_agents.find_one({"host": host}, {"_id": 0})
     await db.oneagent_agents.update_one(
         {"host": host},
         {"$set": {
             "host": host,
             "environment": payload.get("environment"),
             "agent_version": payload.get("agent_version"),
-            "services": payload.get("services") or [],
+            "services": services,
             "api_key_id": key["id"],
             "api_key_name": key.get("name"),
             "last_seen": now,
         }, "$setOnInsert": {"id": str(uuid.uuid4()), "first_seen": now}},
         upsert=True)
+
+    try:
+        from ..services.oneagent_change_service import detect_and_record_changes
+        await detect_and_record_changes(host, previous_doc, payload)
+    except Exception as e:
+        logger.warning(f"change detection failed for host {host} (non-fatal): {e}")
+
     return {"status": "ok"}
 
 
@@ -333,6 +332,73 @@ async def revoke_key(key_id: str, admin: dict = Depends(require_admin)) -> Dict:
 async def list_agents(user: dict = Depends(require_auth)) -> Dict:
     rows = await db.oneagent_agents.find({}, {"_id": 0}).sort("last_seen", -1).to_list(200)
     return {"agents": rows, "count": len(rows)}
+
+
+HEARTBEAT_OFFLINE_AFTER_SECONDS = 180  # matches resource_explorer_service.HEARTBEAT_STALE_AFTER_SECONDS
+
+
+def _seconds_since_iso(iso_ts: Optional[str]) -> Optional[float]:
+    if not iso_ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - dt).total_seconds()
+    except Exception:
+        return None
+
+
+@mgmt_router.get("/hosts/{host}")
+async def get_host_detail(host: str, user: dict = Depends(require_auth)) -> Dict:
+    """Single-host detail merging the agent's heartbeat doc with its latest
+    collected metrics and process list — the one query shape not already
+    covered by GET /api/resources/{resource_id} (which is keyed by topology
+    node id, not raw hostname)."""
+    agent_doc = await db.oneagent_agents.find_one({"host": host}, {"_id": 0})
+    if agent_doc is None:
+        raise HTTPException(status_code=404, detail=f"no OneAgent reporting for host '{host}'")
+
+    latest_metrics = await db.metrics_timeseries.find(
+        {"tags.host": host}, {"_id": 0, "name": 1, "value": 1, "unit": 1, "timestamp": 1},
+    ).sort("timestamp", -1).limit(30).to_list(30)
+
+    age = _seconds_since_iso(agent_doc.get("last_seen"))
+    status = "healthy" if age is not None and age <= HEARTBEAT_OFFLINE_AFTER_SECONDS else "offline"
+    return {
+        "host": host, "agent": agent_doc, "status": status,
+        "seconds_since_last_heartbeat": round(age) if age is not None else None,
+        "recent_metrics": latest_metrics,
+        "process_count": len(agent_doc.get("services") or []),
+    }
+
+
+@mgmt_router.get("/changes")
+async def get_changes(host: Optional[str] = Query(None), change_type: Optional[str] = Query(None),
+                       limit: int = Query(100, le=500), user: dict = Depends(require_auth)) -> Dict:
+    from ..services.oneagent_change_service import list_changes
+    changes = await list_changes(host=host, change_type=change_type, limit=limit)
+    return {"changes": changes, "count": len(changes)}
+
+
+@mgmt_router.get("/health")
+async def get_fleet_health(user: dict = Depends(require_auth)) -> Dict:
+    """Fleet health summary with a real, specific reason per degraded/offline
+    agent — never just a red/green flag with no explanation."""
+    agents = await db.oneagent_agents.find({}, {"_id": 0}).to_list(500)
+    healthy, offline = [], []
+    for a in agents:
+        age = _seconds_since_iso(a.get("last_seen"))
+        if age is not None and age <= HEARTBEAT_OFFLINE_AFTER_SECONDS:
+            healthy.append(a["host"])
+        else:
+            reason = (f"no heartbeat in {round(age)}s (threshold {HEARTBEAT_OFFLINE_AFTER_SECONDS}s)"
+                      if age is not None else "no heartbeat ever recorded")
+            offline.append({"host": a["host"], "reason": reason, "last_seen": a.get("last_seen")})
+    return {
+        "total_agents": len(agents), "healthy_count": len(healthy), "offline_count": len(offline),
+        "healthy_hosts": healthy, "offline_agents": offline,
+    }
 
 
 # ─────────────────────────────────────────────
