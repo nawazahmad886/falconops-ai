@@ -225,13 +225,18 @@ const MODULES = {
     },
     agentic_workflow: {
         id: 'agentic_workflow',
-        label: 'Agentic AI Workflow',
+        label: 'AI Operations',
         icon: Sparkles,
         color: 'text-cyan-400',
-        description: 'Supervisor, Diagnoser, Forecaster — one ask-anything hub',
+        description: 'Agent Builder, Workflow Builder, Tool Catalog, Supervisor/Diagnoser',
         sidebar: [
             { path: '/agentic-workflow', label: 'Agentic Workflow Hub', icon: Sparkles },
             { path: '/incident-commander', label: 'AI Incident Commander', icon: Shield },
+            { path: '/ai/agent-builder', label: 'Agent Builder', icon: Bot },
+            { path: '/ai/agent-catalog', label: 'Agent Catalog', icon: Users },
+            { path: '/ai/workflow-builder', label: 'Agentic Workflows', icon: GitBranch },
+            { path: '/ai/workflow-executions', label: 'Workflow Executions', icon: PlayCircle },
+            { path: '/ai/tools', label: 'Tool Catalog', icon: Wrench },
         ]
     },
     security: {
@@ -383,6 +388,11 @@ const GlobalSearch = ({ open, onOpenChange }) => {
         { type: 'page', label: 'Resource Explorer', path: '/resources', icon: Box },
         { type: 'page', label: 'Agentic AI Workflow', path: '/agentic-workflow', icon: Sparkles },
         { type: 'page', label: 'AI Incident Commander', path: '/incident-commander', icon: Shield },
+        { type: 'page', label: 'Agent Builder', path: '/ai/agent-builder', icon: Bot },
+        { type: 'page', label: 'Agent Catalog', path: '/ai/agent-catalog', icon: Users },
+        { type: 'page', label: 'Agentic Workflows', path: '/ai/workflow-builder', icon: GitBranch },
+        { type: 'page', label: 'Workflow Executions', path: '/ai/workflow-executions', icon: PlayCircle },
+        { type: 'page', label: 'Tool Catalog', path: '/ai/tools', icon: Wrench },
         { type: 'page', label: 'Core AIOps', path: '/core-aiops', icon: Shield },
         { type: 'page', label: 'Database Monitoring', path: '/db-monitoring', icon: Database },
         { type: 'page', label: 'Command Center', path: '/dashboard', icon: LayoutDashboard },
@@ -717,6 +727,11 @@ export const EnterpriseLayout = ({ children }) => {
         if (path.startsWith('/resources')) return 'resources';
         if (path.startsWith('/agentic-workflow')) return 'agentic_workflow';
         if (path.startsWith('/incident-commander')) return 'agentic_workflow';
+        if (path.startsWith('/ai/agent-builder')) return 'agentic_workflow';
+        if (path.startsWith('/ai/agent-catalog')) return 'agentic_workflow';
+        if (path.startsWith('/ai/workflow-builder')) return 'agentic_workflow';
+        if (path.startsWith('/ai/workflow-executions')) return 'agentic_workflow';
+        if (path.startsWith('/ai/tools')) return 'agentic_workflow';
         if (['/dashboard', '/noc-dashboard', '/alert-engine', '/incident-engine', '/wallboard', '/alert-respond', '/self-monitoring', '/control-center', '/custom-dashboard'].some(p => path.startsWith(p))) return 'command';
         if (['/monitoring', '/servers', '/db-monitoring', '/apm', '/honeycomb', '/health-rules', '/synthetic-monitoring', '/query-analyzer', '/uptime-monitor', '/db-agents', '/sla-dashboard', '/check-nodes', '/oneagent-fleet'].some(p => path.startsWith(p))) return 'monitoring';
         if (['/logs', '/topology', '/metrics-explorer', '/service-map'].some(p => path.startsWith(p))) return 'observability';

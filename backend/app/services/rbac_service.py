@@ -43,6 +43,20 @@ PERMISSIONS = {
     "topology.manage": "Manage topology nodes",
     "copilot.use": "Use AI Copilot",
     "settings.manage": "Manage platform settings",
+    # Agent Builder / Agentic Workflow Builder (AI Operations)
+    "agent.read": "View agent definitions and the agent catalog",
+    "agent.create": "Create new agent definitions and draft versions",
+    "agent.edit": "Edit agent draft versions",
+    "agent.publish": "Publish, rollback and archive agent versions",
+    "tool.read": "View the tool catalog",
+    "tool.create": "Create new tool catalog entries",
+    "tool.edit": "Edit, disable and version tool catalog entries",
+    "workflow.read": "View workflow definitions, executions and observability",
+    "workflow.create": "Create workflows, drafts, clones and imports",
+    "workflow.edit": "Edit workflow draft versions",
+    "workflow.publish": "Publish, rollback and archive workflow versions",
+    "workflow.execute": "Run, dry-run, test-run and cancel workflow executions; decide non-destructive approvals",
+    "workflow.delete": "Delete workflow definitions",
 }
 
 # ======================== DEFAULT ROLES ========================
@@ -63,6 +77,7 @@ DEFAULT_ROLES = {
             "ueba.view", "impact.analyze", "remediation.view",
             "reports.view", "audit.view", "copilot.use",
             "health_rules.view", "topology.view",
+            "agent.read", "tool.read", "workflow.read",
         ],
         "is_system": True,
     },
@@ -76,6 +91,12 @@ DEFAULT_ROLES = {
             "impact.analyze", "reports.view", "reports.manage",
             "topology.view", "topology.manage", "copilot.use",
             "integrations.view",
+            # Agent/workflow authoring and running — not publish/delete, which stay admin-only
+            # (mirrors remediation.approve_destructive staying admin-only, same reasoning:
+            # publishing gates what runs unattended in production).
+            "agent.read", "agent.create", "agent.edit",
+            "tool.read",
+            "workflow.read", "workflow.create", "workflow.edit", "workflow.execute",
         ],
         "is_system": True,
     },
@@ -86,6 +107,7 @@ DEFAULT_ROLES = {
             "dashboard.view", "monitors.view", "alerts.view",
             "security.view", "ueba.view", "reports.view",
             "health_rules.view", "topology.view", "audit.view",
+            "agent.read", "tool.read", "workflow.read",
         ],
         "is_system": True,
     },

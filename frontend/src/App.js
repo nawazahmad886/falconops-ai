@@ -10,6 +10,12 @@ import { LoginPage, RegisterPage } from './pages/AuthPages';
 import { DashboardPage } from './pages/DashboardPage';
 import { RasedPage } from './pages/RasedPage';
 import IncidentCommanderPage from './pages/IncidentCommanderPage';
+import AgentBuilderPage from './pages/AgentBuilderPage';
+import AgentCatalogPage from './pages/AgentCatalogPage';
+import ToolCatalogPage from './pages/ToolCatalogPage';
+import WorkflowBuilderPage from './pages/WorkflowBuilderPage';
+import WorkflowExecutionsPage from './pages/WorkflowExecutionsPage';
+import WorkflowExecutionDetailPage from './pages/WorkflowExecutionDetailPage';
 import { AlertsPage } from './pages/AlertsPage';
 import { IncidentsPage } from './pages/IncidentsPage';
 import { RunbooksPage } from './pages/RunbooksPage';
@@ -226,6 +232,70 @@ const AppRoutes = () => {
                 element={
                     <ProtectedRoute>
                         <RasedPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/agent-builder"
+                element={
+                    <ProtectedRoute>
+                        <AgentBuilderPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/agent-builder/:agentId"
+                element={
+                    <ProtectedRoute>
+                        <AgentBuilderPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/agent-catalog"
+                element={
+                    <ProtectedRoute>
+                        <AgentCatalogPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/tools"
+                element={
+                    <ProtectedRoute>
+                        <ToolCatalogPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/workflow-builder"
+                element={
+                    <ProtectedRoute>
+                        <WorkflowBuilderPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/workflow-builder/:workflowId"
+                element={
+                    <ProtectedRoute>
+                        <WorkflowBuilderPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/workflow-executions"
+                element={
+                    <ProtectedRoute>
+                        <WorkflowExecutionsPage />
+                    </ProtectedRoute>
+                }
+            />
+            <Route
+                path="/ai/workflow-executions/:executionId"
+                element={
+                    <ProtectedRoute>
+                        <WorkflowExecutionDetailPage />
                     </ProtectedRoute>
                 }
             />

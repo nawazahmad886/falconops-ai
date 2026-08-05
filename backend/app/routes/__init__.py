@@ -91,6 +91,10 @@ from .backup_routes import router as backup_router
 from .onboarding_routes import router as onboarding_router
 from .incident_commander_routes import router as incident_commander_router, audit_router as incident_commander_audit_router
 from .troubleshooting_routes import router as troubleshooting_router
+from .agent_builder_routes import router as agent_builder_router
+from .tool_catalog_routes import router as tool_catalog_router
+from .workflow_builder_routes import router as workflow_builder_router
+from .workflow_execution_routes import router as workflow_execution_router
 
 # Export all routers
 all_routers = [
@@ -192,4 +196,8 @@ all_routers = [
     incident_commander_router,
     incident_commander_audit_router,
     troubleshooting_router,
+    agent_builder_router,
+    tool_catalog_router,
+    workflow_builder_router,
+    workflow_execution_router,
 ]

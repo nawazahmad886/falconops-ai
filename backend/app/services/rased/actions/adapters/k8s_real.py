@@ -150,4 +150,34 @@ async def restart_pod(cluster_config: Dict[str, Any], service: str) -> Dict[str,
     }
 
 
-__all__ = ["KubernetesUnavailable", "build_api_client", "test_connection", "restart_pod"]
+async def list_pods(cluster_config: Dict[str, Any], namespace: str, label_selector: Optional[str] = None) -> Dict[str, Any]:
+    """Read-only pod listing — backs the Tool Catalog's k8s_read binding
+    (Agent Builder / Workflow Builder tool calls). Never deletes/mutates
+    anything; a thin sibling to restart_pod's own list-then-act step."""
+    api_client = build_api_client(cluster_config)
+
+    def _call():
+        core = k8s_client.CoreV1Api(api_client)
+        pods = core.list_namespaced_pod(
+            namespace=namespace, label_selector=label_selector or None, _request_timeout=10,
+        )
+        return [
+            {
+                "name": p.metadata.name,
+                "phase": p.status.phase,
+                "restarts": sum(c.restart_count for c in (p.status.container_statuses or [])),
+            }
+            for p in pods.items
+        ]
+
+    try:
+        pods = await asyncio.to_thread(_call)
+    finally:
+        try:
+            api_client.close()
+        except Exception:
+            pass
+    return {"namespace": namespace, "label_selector": label_selector, "pods": pods}
+
+
+__all__ = ["KubernetesUnavailable", "build_api_client", "test_connection", "restart_pod", "list_pods"]

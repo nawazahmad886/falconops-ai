@@ -228,6 +228,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Runbook schedule scheduler init warning: {e}")
 
+    # AI Operations (Agent Builder + Agentic Workflow Builder): idempotent seed of
+    # the 8 RASED-wrapper agent definitions and the 3 built-in workflow templates —
+    # same pattern as rbac_service.init_default_roles().
+    try:
+        from app.services.agent_builder.agent_definition_service import seed_rased_wrapper_agents
+        from app.services.workflow.templates_seed import seed_built_in_templates
+        await seed_rased_wrapper_agents()
+        await seed_built_in_templates()
+        logger.info("AI Operations: RASED-wrapper agents and built-in workflow templates seeded")
+    except Exception as e:
+        logger.warning(f"AI Operations seed warning: {e}")
+
     # Control Center: job watchdog — auto-restarts any of the above asyncio_task
     # background jobs if it crashes or stops unexpectedly while this process is
     # still up (whole-process crashes are already handled by docker-compose's
